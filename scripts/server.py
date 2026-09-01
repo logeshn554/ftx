@@ -54,6 +54,8 @@ try:
 except ImportError:
     from scripts.webrl_engine import WebRLEngine, TradeContext  # type: ignore
 
+from trade.execution.paper_session import PaperTradingSession
+
 webrl = WebRLEngine()
 
 BASE_DIR = Path(__file__).parent.parent.resolve()
@@ -147,6 +149,12 @@ class SystemState:
             {"time": time.strftime("%H:%M:%S"), "level": "info", "message": "Live Bitcoin data stream connected (Binance live feed)"},
         ]
         self.ws_clients = set()
+        self.consecutive_losses = 0
+        self.paper = PaperTradingSession(
+            initial_cash=self.initial_capital,
+            fee_pct=self.trading_fee_pct / 100.0,
+            slippage_pct=0.0005,
+        )
 
 state = SystemState()
 
@@ -341,60 +349,67 @@ def live_trading_lifecycle_worker():
                 state.agent_status = "Circuit Breaker OPEN — Trading Paused"
                 continue
 
-            # 2. Manage Open Position — ATR-based TP/SL with 0.1% Fee Accounting
-            if state.open_position is not None:
-                pos = state.open_position
+            # 2. Manage Open Position — canonical ledger accounting
+            ledger_pos = state.paper.ledger.open_position
+            if ledger_pos is not None:
                 current_p = state.btc_price
-                entry_p = pos["entry_price"]
-                qty = pos["quantity"]
-                side = pos["side"]
-
-                # Price difference & Gross PnL
-                price_diff = (current_p - entry_p) if side == "BUY" else (entry_p - current_p)
-                gross_pnl_dollars = round(price_diff * qty, 4)
-                gross_pnl_pct = round((price_diff / max(entry_p, 1.0)) * 100, 4)
-                
-                # 0.1% Trading Fee Accounting (Entry fee was pre-paid; exit fee calculated for close)
-                exit_fee_dollars = round(pos["allocated_capital"] * 0.001, 4)
-                total_roundtrip_fee = round(pos.get("entry_fee", 0.0) + exit_fee_dollars, 4)
-                net_pnl_dollars = round(gross_pnl_dollars - total_roundtrip_fee, 4)
-                net_pnl_pct = round((net_pnl_dollars / max(pos["allocated_capital"], 1.0)) * 100, 2)
-
-                pos["current_price"] = current_p
-                pos["gross_pnl"] = gross_pnl_dollars
-                pos["gross_pnl_pct"] = gross_pnl_pct
-                pos["fee"] = total_roundtrip_fee
-                pos["pnl"] = net_pnl_dollars
-                pos["pnl_pct"] = net_pnl_pct
-                pos["duration_bars"] = pos.get("duration_bars", 0) + 1
-
-                # Dynamic scalp TP/SL thresholds
-                tp_threshold = pos.get("tp_pct", 0.015)
-                sl_threshold = -abs(pos.get("sl_pct", 0.012))
-
-                tp_reached = gross_pnl_pct >= tp_threshold
-                sl_reached = gross_pnl_pct <= sl_threshold
-                time_expired = pos["duration_bars"] >= 6  # 6 bars × 3s = 18s scalp hold
-
-                if tp_reached or sl_reached or time_expired:
-                    close_tag = "🎯 TAKE-PROFIT HIT" if tp_reached else ("🛑 STOP-LOSS HIT" if sl_reached else "⏱️ TIME EXPIRED")
-                    
-                    # Restore cash + gross PnL - exit fee (4-decimal precision to accurately track sub-cent fees)
-                    state.cash_balance = round(state.cash_balance + pos["allocated_capital"] + gross_pnl_dollars - exit_fee_dollars, 4)
-                    state.daily_pnl = round(state.cash_balance - state.initial_capital, 4)
-                    state.total_fees_paid = round(state.total_fees_paid + exit_fee_dollars, 4)
+                close_result = state.paper.check_close(current_p, max_bars=6)
+                if close_result is None:
+                    ledger_pos.mark(current_p)
+                    snap = state.paper.snapshot(current_p)
+                    state.cash_balance = round(snap.cash, 4)
+                    meta = state.paper._open_meta or {}
+                    state.open_position = {
+                        "symbol": "BTC/USDT",
+                        "side": ledger_pos.side,
+                        "entry_price": ledger_pos.entry_price,
+                        "current_price": current_p,
+                        "quantity": ledger_pos.quantity,
+                        "allocated_capital": ledger_pos.entry_price * ledger_pos.quantity,
+                        "gross_pnl": ledger_pos.gross_pnl,
+                        "pnl": ledger_pos.unrealized_pnl(),
+                        "pnl_pct": ledger_pos.return_pct,
+                        "tp_pct": meta.get("tp_pct", 0),
+                        "sl_pct": meta.get("sl_pct", 0),
+                        "pattern": meta.get("strategy", "canonical"),
+                        "duration_bars": meta.get("duration_bars", 0),
+                    }
+                    state.current_step = (
+                        f"4. Active Position ({ledger_pos.side} {ledger_pos.quantity:.6f} BTC) -> "
+                        f"Net: ${ledger_pos.unrealized_pnl():.4f} | TP: +{meta.get('tp_pct', 0):.3f}%"
+                    )
+                else:
+                    snap = state.paper.snapshot(current_p)
+                    state.cash_balance = round(snap.cash, 4)
+                    state.total_fees_paid = round(snap.total_fees, 4)
                     state.total_trades_count += 1
+                    net_pnl_dollars = close_result.net_pnl
+                    net_pnl_pct = close_result.return_pct
                     if net_pnl_dollars >= 0:
                         state.winning_trades_count += 1
+                        state.consecutive_losses = 0
+                    else:
+                        state.consecutive_losses += 1
 
                     outcome_type = "PROFIT" if net_pnl_dollars >= 0 else "LOSS"
                     log_lvl = "success" if net_pnl_dollars >= 0 else "warning"
+                    side = ledger_pos.side if ledger_pos else "BUY"
+                    qty = state.open_position["quantity"] if state.open_position else 0
+                    entry_p = state.open_position["entry_price"] if state.open_position else current_p
 
-                    # Build TradeContext for WebRL feedback
+                    if close_result.close_reason == "TP_PRICE_HIT_NET_LOSS":
+                        close_tag = "🎯 TP PRICE HIT (NET LOSS AFTER FEES)"
+                    elif close_result.tp_price_hit:
+                        close_tag = "🎯 TP PRICE HIT"
+                    elif close_result.sl_price_hit:
+                        close_tag = "🛑 STOP-LOSS HIT"
+                    else:
+                        close_tag = "⏱️ TIME EXPIRED"
+
                     trade_ctx = TradeContext(
                         timestamp=time.strftime("%H:%M:%S"),
                         side=side,
-                        pattern=pos.get("pattern", "Unknown"),
+                        pattern=state.open_position.get("pattern", "Unknown") if state.open_position else "Unknown",
                         regime=state.current_regime,
                         regime_confidence=state.regime_confidence,
                         rsi=state.pattern_rsi,
@@ -402,31 +417,15 @@ def live_trading_lifecycle_worker():
                         entry_price=entry_p,
                         exit_price=current_p,
                         quantity=qty,
-                        allocated_capital=pos["allocated_capital"],
+                        allocated_capital=entry_p * qty,
                         pnl=net_pnl_dollars,
                         pnl_pct=net_pnl_pct,
-                        duration_bars=pos.get("duration_bars", 0),
+                        duration_bars=state.open_position.get("duration_bars", 0) if state.open_position else 0,
                         outcome=outcome_type,
                         price_trajectory=list(state.price_history)[-10:],
                     )
-
-                    # === WebRL FEEDBACK LOOP with Q-Learning ===
-                    entry_indicators = pos.get("entry_indicators", None)
-                    webrl_result = {}
-                    if outcome_type == "LOSS":
-                        webrl_result = webrl.on_loss(trade_ctx, entry_indicators=entry_indicators)
-                        state.events.insert(0, {
-                            "time": time.strftime("%H:%M:%S"),
-                            "level": "error",
-                            "message": f"Q-LEARNING LOSS: {pos.get('pattern')} -> Penalized in Q-Table | PnL: {net_pnl_pct:+.2f}%"
-                        })
-                    else:
-                        webrl_result = webrl.on_win(trade_ctx, entry_indicators=entry_indicators)
-                        state.events.insert(0, {
-                            "time": time.strftime("%H:%M:%S"),
-                            "level": "success",
-                            "message": f"💎 Q-LEARNING WIN: {pos.get('pattern')} -> Reinforced in Q-Table | PnL: {net_pnl_pct:+.2f}%"
-                        })
+                    entry_indicators = state.open_position.get("entry_indicators") if state.open_position else None
+                    webrl_result = webrl.on_loss(trade_ctx, entry_indicators=entry_indicators) if outcome_type == "LOSS" else webrl.on_win(trade_ctx, entry_indicators=entry_indicators)
 
                     closed_trade = {
                         "time": time.strftime("%H:%M:%S"),
@@ -435,14 +434,13 @@ def live_trading_lifecycle_worker():
                         "entry_price": entry_p,
                         "exit_price": current_p,
                         "quantity": qty,
-                        "allocated": pos["allocated_capital"],
-                        "fee": total_roundtrip_fee,
+                        "fee": close_result.fees,
+                        "slippage": close_result.slippage,
                         "pnl": round(net_pnl_dollars, 4),
-                        "gross_pnl": round(gross_pnl_dollars, 4),
+                        "gross_pnl": round(close_result.gross_pnl, 4),
                         "pnl_pct": net_pnl_pct,
                         "outcome": outcome_type,
                         "balance_after": state.cash_balance,
-                        "pattern": pos["pattern"],
                         "close_reason": close_tag,
                         "webrl_feedback": webrl_result.get("event", ""),
                     }
@@ -450,180 +448,108 @@ def live_trading_lifecycle_worker():
                     if len(state.trades_history) > 50:
                         state.trades_history.pop()
 
-                    # Explicit user-facing BOUGHT/STOPLOSS/SOLD event log
                     state.events.insert(0, {
                         "time": time.strftime("%H:%M:%S"),
                         "level": log_lvl,
-                        "message": f"{close_tag}: SOLD/CLOSED {side} {qty:.6f} BTC @ ${current_p:,.2f} | {outcome_type}: {'+' if net_pnl_dollars >= 0 else ''}${net_pnl_dollars:.2f} ({net_pnl_pct:+.2f}%) [Fee: ${total_roundtrip_fee:.3f}] | Balance: ${state.cash_balance:.2f}"
+                        "message": (
+                            f"{close_tag}: CLOSED {side} {qty:.6f} BTC @ ${current_p:,.2f} | "
+                            f"Gross: ${close_result.gross_pnl:.4f} | Fees: ${close_result.fees:.4f} | "
+                            f"Slippage: ${close_result.slippage:.4f} | Net: ${net_pnl_dollars:.4f} ({net_pnl_pct:+.2f}%) | "
+                            f"Balance: ${state.cash_balance:.2f}"
+                        ),
                     })
-
                     state.open_position = None
-                    state.current_step = f"5. {close_tag} -> Scanning Next Pattern (Balance: ${state.cash_balance:.2f})"
-                else:
-                    state.current_step = f"4. Active Position ({side} {qty:.6f} BTC @ ${entry_p:,.2f}) -> PnL: {'+' if net_pnl_dollars >= 0 else ''}${net_pnl_dollars:.2f} ({net_pnl_pct:+.2f}%) [Fee: ${total_roundtrip_fee:.3f}] | TP: +{tp_threshold:.3f}%, SL: {sl_threshold:.3f}%"
+                    state.daily_pnl = round(state.cash_balance - state.initial_capital, 4)
+                    state.current_step = f"5. {close_tag} -> Scanning (Balance: ${state.cash_balance:.2f})"
 
-            # 3. If Flat (No open position), Check Account Health & Run Trading Pipeline
+            # 3. If Flat, run canonical decision pipeline
             else:
-                # 3a. AUTONOMOUS RETRAINING LOOP ON ACCOUNT DEATH (Balance < $2.00)
                 if state.cash_balance < 2.00:
-                    state.generation += 1
-                    state.model_stage = f"Self-Evolving Gen #{state.generation}"
-                    
-                    # Retrain Q-table policy with all historical loss data
-                    macro_report = webrl.run_100_attempt_macro_analysis()
-                    
+                    state.circuit_breaker = "OPEN"
+                    state.agent_status = "HALTED — capital below survival floor; champion unchanged"
                     state.events.insert(0, {
                         "time": time.strftime("%H:%M:%S"),
                         "level": "error",
-                        "message": f"💀 ACCOUNT DIED (Balance ${state.cash_balance:.2f} < $2.00) -> 🧬 AUTONOMOUS RETRAINING TRIGGERED (Generation #{state.generation}) | Policy weights re-optimized!"
+                        "message": f"⛔ SURVIVAL HALT: Balance ${state.cash_balance:.2f} < $2.00 — no new trades until reset",
                     })
-                    state.events.insert(0, {
-                        "time": time.strftime("%H:%M:%S"),
-                        "level": "info",
-                        "message": f"🔄 Account Reset to $10.00 Capital for Gen #{state.generation} -> Continuing until +$15.00 Profit is achieved!"
-                    })
-                    
-                    # Reset account back to $10.00 for the newly retrained generation
-                    state.cash_balance = 10.00
-                    state.initial_capital = 10.00
-                    state.equity = 10.00
-                    state.agent_status = f"Gen #{state.generation} Retrained & Active — Target: +$15 Profit"
 
-                # 3b. PROFIT TARGET REACHED CHECK (+$15 Profit -> $25 Equity)
                 profit_so_far = round(state.cash_balance - state.initial_capital, 2)
                 if profit_so_far >= state.target_profit:
                     state.agent_status = f"🏆 TARGET REACHED: +${profit_so_far:.2f} PROFIT! (Equity: ${state.cash_balance:.2f})"
 
-                # Evaluate every 2 ticks (6 seconds between scans)
-                if cycle_counter % 2 == 0:
-                    # Real indicator-based signal detection
+                if cycle_counter % 2 == 0 and state.circuit_breaker != "OPEN":
                     trend = ind["trend"]
                     rsi = ind["rsi_14"]
                     rsi_zone = ind["rsi_zone"]
                     bb_pos = ind["bb_position"]
                     momentum = ind["momentum_20"]
                     atr_pct = ind["atr_pct"]
-                    ema10 = ind["ema_10"]
-                    ema30 = ind["ema_30"]
                     price = state.btc_price
 
-                    # Determine signal and side from REAL indicators
-                    if rsi <= 40:
-                        signal_name = "RSI Deep Oversold Rebound"
-                        signal_detail = f"RSI={rsi:.1f} (Oversold), Momentum={momentum:+.3f}%"
-                        signal_side = "BUY"
-                        signal_strength = 0.75
-                    elif rsi >= 60:
-                        signal_name = "RSI Overbought Mean Reversion"
-                        signal_detail = f"RSI={rsi:.1f} (Overbought), Momentum={momentum:+.3f}%"
-                        signal_side = "SELL"
-                        signal_strength = 0.75
-                    elif ema10 >= ema30:
-                        if momentum >= 0:
-                            signal_name = "EMA Bullish Golden Cross"
-                            signal_detail = f"EMA10({ema10:.0f}) >= EMA30({ema30:.0f}), RSI={rsi:.1f}"
-                            signal_side = "BUY"
-                            signal_strength = min(0.95, 0.60 + abs(momentum) * 10)
-                        else:
-                            signal_name = "Bullish Pullback Support"
-                            signal_detail = f"EMA Trend Bullish, Pullback RSI={rsi:.1f}"
-                            signal_side = "BUY"
-                            signal_strength = 0.55
-                    else:
-                        if momentum <= 0:
-                            signal_name = "EMA Bearish Death Cross"
-                            signal_detail = f"EMA10({ema10:.0f}) < EMA30({ema30:.0f}), RSI={rsi:.1f}"
-                            signal_side = "SELL"
-                            signal_strength = min(0.95, 0.60 + abs(momentum) * 10)
-                        else:
-                            signal_name = "Bearish Counter-Rally Rejection"
-                            signal_detail = f"EMA Trend Bearish, Rejection RSI={rsi:.1f}"
-                            signal_side = "SELL"
-                            signal_strength = 0.55
-
-                    # Update dashboard display
                     state.current_regime = trend if trend != "FLAT" else ("Bullish Bias" if momentum >= 0 else "Bearish Bias")
-                    state.regime_confidence = round(signal_strength, 2)
-                    state.detected_pattern = f"{signal_name} ({signal_detail})"
+                    state.regime_confidence = round(min(0.95, 0.55 + abs(momentum) / 10), 2)
 
-                    # Execute on detected directional signals (DIRECT STRATEGY: BUY means BUY, SELL means SELL)
-                    if signal_side and signal_strength >= 0.20:
-                        # Dynamic Scalp TP/SL calibrated for realistic micro moves
-                        tp_pct = max(0.015, min(0.08, round(max(atr_pct, 0.01) * 1.5, 4)))
-                        sl_pct = max(0.012, min(0.06, round(max(atr_pct, 0.01) * 1.2, 4)))
+                    chosen_eval = webrl.evaluate_trade(
+                        pattern=state.detected_pattern, regime=trend, regime_conf=state.regime_confidence,
+                        rsi=rsi, macd=state.pattern_macd, side="BUY",
+                        current_drawdown=state.drawdown, indicators=ind,
+                    )
+                    q_value = float(chosen_eval.get("q_value", 0.0))
+                    p_win = min(1.0, max(0.0, 0.5 + q_value * 0.25))
 
-                        # Evaluate through WebRL Q-learning for the direct signal side
-                        chosen_eval = webrl.evaluate_trade(
-                            pattern=signal_name, regime=trend, regime_conf=signal_strength,
-                            rsi=rsi, macd=state.pattern_macd, side=signal_side,
-                            current_drawdown=state.drawdown,
-                            indicators=ind,
-                        )
+                    decision = state.paper.evaluate_entry(
+                        indicators=ind,
+                        price=price,
+                        regime=state.current_regime,
+                        regime_confidence=state.regime_confidence,
+                        drawdown=state.drawdown,
+                        consecutive_losses=state.consecutive_losses,
+                        q_p_win=p_win,
+                    )
+                    state.webrl_eval = {**chosen_eval, "canonical_decision": decision.reason, "expected_value": decision.expected_value}
+                    state.last_decision = decision.action if decision.action == "HOLD" else f"{decision.side} ({decision.strategy})"
+                    state.detected_pattern = decision.strategy or "No signal"
+                    state.risk_guard_status = f"EV={decision.expected_value:.4f} cost={decision.estimated_cost:.3f}% | {decision.reason}"
 
-                        state.webrl_eval = chosen_eval
-                        muzero_ev = float(chosen_eval.get("muzero_plan", {}).get("expected_value_pct", 0.0))
-                        grpo_adv = float(chosen_eval.get("grpo_result", {}).get("top_advantage", 0.0))
-                        q_value = float(chosen_eval.get("q_value", 0.0))
-
-                        mode_tag = f"[{chosen_eval.get('trade_mode', 'RL_SIGNAL')}]"
-                        state.risk_guard_status = f"{mode_tag} Q={q_value:+.3f} ATR={atr_pct:.3f}%"
-                        state.last_decision = f"{signal_side} ({signal_name}, {mode_tag} Q={q_value:+.3f})"
-                        state.current_step = f"1. Signal: {signal_name} -> {signal_side} {mode_tag} (ATR={atr_pct:.3f}%, Q={q_value:+.3f})"
-
-                        state.faiss_match_desc = f"Q-Table State: trend={trend}, rsi_zone={rsi_zone}, bb={bb_pos} | ATR={atr_pct:.3f}%"
-
-                        # 4. Execute trade on $10 budget if Q-learning approved
-                        if chosen_eval.get("should_trade", False):
-                            alloc_pct = chosen_eval.get("adapted_position_pct", 0.25)
-                            alloc_capital = round(max(0.50, min(state.cash_balance * alloc_pct, state.cash_balance * 0.50)), 2)
-                            if alloc_capital >= 0.50 and state.cash_balance >= alloc_capital:
-                                entry_fee = round(alloc_capital * 0.001, 4)  # 0.1% entry fee
-                                trade_qty = round(alloc_capital / max(state.btc_price, 1.0), 6)
-                                state.cash_balance = round(state.cash_balance - alloc_capital - entry_fee, 4)
-                                state.total_fees_paid = round(state.total_fees_paid + entry_fee, 4)
-
-                                state.open_position = {
-                                    "symbol": "BTC/USDT",
-                                    "side": signal_side,
-                                    "entry_price": state.btc_price,
-                                    "current_price": state.btc_price,
-                                    "quantity": trade_qty,
-                                    "allocated_capital": alloc_capital,
-                                    "entry_fee": entry_fee,
-                                    "fee": entry_fee,
-                                    "gross_pnl": 0.00,
-                                    "gross_pnl_pct": 0.00,
-                                    "pnl": 0.00,
-                                    "pnl_pct": 0.00,
-                                    "duration_bars": 0,
-                                    "pattern": signal_name,
-                                    "tp_pct": tp_pct,
-                                    "sl_pct": sl_pct,
-                                    "orm_score": chosen_eval.get("orm_score", 0.0),
-                                    "muzero_ev": muzero_ev,
-                                    "grpo_adv": grpo_adv,
-                                    "q_value": q_value,
-                                    "trade_mode": chosen_eval.get("trade_mode", "RL_SIGNAL"),
-                                    "entry_indicators": dict(ind),  # snapshot
-                                }
-
-                                action_verb = "🟢 BOUGHT" if signal_side == "BUY" else "🔴 SHORTED (SELL)"
-                                state.events.insert(0, {
-                                    "time": time.strftime("%H:%M:%S"),
-                                    "level": "info",
-                                    "message": f"{action_verb}: {signal_side} {trade_qty:.6f} BTC @ ${state.btc_price:,.2f} [Alloc: ${alloc_capital:.2f}, Fee: ${entry_fee:.3f}] | Signal: {signal_name} | TP=+{tp_pct:.3f}% SL=-{sl_pct:.3f}% | Q={q_value:+.3f}"
-                                })
-                                state.current_step = f"3. RL Order: {signal_side} {trade_qty:.6f} BTC @ ${state.btc_price:,.2f} ({mode_tag})"
+                    if decision.action == "TRADE" and chosen_eval.get("should_trade", False):
+                        if state.paper.open_trade("BTC/USDT", decision, price):
+                            pos = state.paper.ledger.open_position
+                            snap = state.paper.snapshot(price)
+                            state.cash_balance = round(snap.cash, 4)
+                            state.open_position = {
+                                "symbol": "BTC/USDT",
+                                "side": pos.side,
+                                "entry_price": pos.entry_price,
+                                "current_price": price,
+                                "quantity": pos.quantity,
+                                "allocated_capital": pos.entry_price * pos.quantity,
+                                "tp_pct": decision.target_pct,
+                                "sl_pct": decision.stop_pct,
+                                "pattern": decision.strategy,
+                                "entry_indicators": dict(ind),
+                                "duration_bars": 0,
+                                "q_value": q_value,
+                            }
+                            verb = "🟢 BOUGHT" if pos.side == "BUY" else "🔴 SHORTED"
+                            state.events.insert(0, {
+                                "time": time.strftime("%H:%M:%S"),
+                                "level": "info",
+                                "message": (
+                                    f"{verb}: {pos.side} {pos.quantity:.6f} BTC @ ${price:,.2f} | "
+                                    f"Strategy: {decision.strategy} | TP=+{decision.target_pct:.3f}% "
+                                    f"SL=-{decision.stop_pct:.3f}% | EV={decision.expected_value:.4f}"
+                                ),
+                            })
+                            state.current_step = f"3. Canonical order: {pos.side} via {decision.strategy}"
                     else:
-                        if not signal_side:
-                            state.current_step = "2. Scanning... No clear directional signal"
-                        else:
-                            state.current_step = f"2. Signal weak: {signal_name} (strength={signal_strength:.2f})"
+                        state.current_step = f"2. HOLD — {decision.reason}"
+                    state.faiss_match_desc = f"Q={q_value:+.3f} trend={trend} rsi_zone={rsi_zone} bb={bb_pos}"
 
-            # 5. Compute Total Equity
-            unrealized = state.open_position["pnl"] if state.open_position else 0.00
-            allocated = state.open_position["allocated_capital"] if state.open_position else 0.00
-            state.equity = round(state.cash_balance + allocated + unrealized, 4)
+            # 5. Compute Total Equity from canonical ledger
+            snap = state.paper.snapshot(state.btc_price)
+            state.cash_balance = round(snap.cash, 4)
+            state.equity = round(snap.equity, 4)
+            state.total_fees_paid = round(snap.total_fees, 4)
             if state.equity > state.peak_equity:
                 state.peak_equity = state.equity
             state.drawdown = round(max(0.0, (state.peak_equity - state.equity) / state.peak_equity), 4)

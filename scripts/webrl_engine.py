@@ -654,29 +654,23 @@ class KLConstrainedPolicyAdapter:
         # Compute KL divergence between proposed and base
         kl = self._compute_kl(proposed)
 
-        # If within budget, apply. Otherwise, interpolate toward budget boundary.
-        if kl <= self.kl_budget:
-            self.current_policy = proposed
-        else:
-            # Interpolate: find alpha such that KL(interpolated, base) ≈ kl_budget
-            alpha = self.kl_budget / max(kl, 0.001)
-            self.current_policy = self._interpolate(self.current_policy, proposed, alpha)
-
+        # Champion policy is immutable.  Proposals are returned for candidate
+        # generation only and must never be applied to current_policy live.
         self.total_adaptations += 1
-
         update_record = {
             "adaptation_id": self.total_adaptations,
             "failure_cause": cause,
             "pattern": pattern,
             "severity": round(severity, 3),
-            "kl_distance": round(self._compute_kl(self.current_policy), 4),
+            "kl_distance": round(self._compute_kl(proposed), 4),
             "kl_budget": self.kl_budget,
-            "position_size": round(self.current_policy["position_size_pct"], 3),
-            "stop_loss": round(self.current_policy["stop_loss_pct"], 3),
-            "risk_threshold": round(self.current_policy["xgb_risk_threshold"], 3),
+            "proposed_position_size": round(proposed["position_size_pct"], 3),
+            "proposed_stop_loss": round(proposed["stop_loss_pct"], 3),
+            "applied": False,
             "time": time.strftime("%H:%M:%S"),
         }
         self.update_history.append(update_record)
+        return update_record
         if len(self.update_history) > 50:
             self.update_history.pop(0)
 
@@ -688,12 +682,12 @@ class KLConstrainedPolicyAdapter:
     def adapt_on_win(self, ctx: TradeContext):
         """Reinforce successful patterns by slightly boosting their confidence."""
         pattern = ctx.pattern
+        # Champion policy is immutable; win reinforcement is advisory only.
         if pattern in self.current_policy["pattern_confidences"]:
             old = self.current_policy["pattern_confidences"][pattern]
-            self.current_policy["pattern_confidences"][pattern] = min(0.98, old + 0.01)
-
-        # Slightly increase position sizing on wins (bounded)
-        self.current_policy["position_size_pct"] = min(0.40, self.current_policy["position_size_pct"] + 0.005)
+            _proposed_conf = min(0.98, old + 0.01)
+            return {"pattern": pattern, "proposed_confidence": _proposed_conf, "applied": False}
+        return {"applied": False}
 
     def _compute_kl(self, policy: dict) -> float:
         """Approximate KL divergence between policy and base_policy."""
@@ -1087,22 +1081,14 @@ class GoalAndSurvivalController:
             old_target = self.profit_target
             self.profit_target = round(current_equity + 15.0, 2)  # Step up next milestone target (+15.0)
             
-            # RL Weight Reward Boost on all winning patterns
-            cur_policy = webrl_engine.policy_adapter.current_policy
-            for p in cur_policy["pattern_confidences"]:
-                cur_policy["pattern_confidences"][p] = min(0.98, round(cur_policy["pattern_confidences"][p] * 1.03, 3))
-            
-            # Slightly expand take-profit to lock in higher alpha
-            cur_policy["take_profit_pct"] = min(2.5, round(cur_policy["take_profit_pct"] + 0.1, 3))
-            webrl_engine.policy_adapter.base_policy = json.loads(json.dumps(cur_policy))
-
+            # Champion policy is immutable; milestone is logged for research only.
             event = {
                 "type": "PROFIT_GOAL_ACHIEVED",
-                "message": f"🏆 PROFIT TARGET REACHED! Equity reached ${current_equity:.2f} (+$15.00 Profit!) | Promoted to Evolved Generation #{self.generation} | Next Goal: ${self.profit_target:.2f}",
+                "message": f"🏆 PROFIT TARGET REACHED! Equity reached ${current_equity:.2f} | Research milestone logged (champion unchanged) | Next Goal: ${self.profit_target:.2f}",
                 "generation": self.generation,
                 "current_equity": current_equity,
                 "next_target": self.profit_target,
-                "actions": "Reinforced winning weights, widened Take-Profit target, evolved generation.",
+                "actions": "Experience logged; candidate evaluation may be triggered externally.",
                 "timestamp": time.strftime("%H:%M:%S")
             }
             self.last_boundary_event = event
@@ -1111,21 +1097,12 @@ class GoalAndSurvivalController:
         # 2. Ruin Prevention / Steep Drawdown (Equity drops toward $0, e.g. < $950)
         elif current_equity < (self.start_capital * 0.95) and current_equity > self.ruin_floor:
             self.survivals_triggered += 1
-            cur_policy = webrl_engine.policy_adapter.current_policy
-            
-            # Aggressive survival weight adjustment
-            cur_policy["position_size_pct"] = max(0.12, round(cur_policy["position_size_pct"] * 0.88, 3))
-            cur_policy["stop_loss_pct"] = max(0.50, round(cur_policy["stop_loss_pct"] * 0.88, 3))
-            cur_policy["regime_filter_strict"] = True
-            cur_policy["xgb_risk_threshold"] = max(0.18, round(cur_policy["xgb_risk_threshold"] * 0.90, 3))
-            webrl_engine.policy_adapter.base_policy = json.loads(json.dumps(cur_policy))
-
             event = {
                 "type": "RUIN_PREVENTION_ACTIVATED",
-                "message": f"🚨 CAPITAL DEFENSE ACTIVATED: Equity down to ${current_equity:.2f} -> Reduced position size to {cur_policy['position_size_pct']*100:.1f}% & tightened stop-loss to {cur_policy['stop_loss_pct']:.2f}% to avoid $0.00 ruin.",
+                "message": f"🚨 CAPITAL DEFENSE: Equity ${current_equity:.2f} — survival controller may halt new trades; champion policy unchanged.",
                 "generation": self.generation,
                 "current_equity": current_equity,
-                "actions": "Cut allocation size, strict regime lock, tightened risk threshold.",
+                "actions": "Survival HALTED/DEFENSIVE via canonical risk layer; no live policy mutation.",
                 "timestamp": time.strftime("%H:%M:%S")
             }
             self.last_boundary_event = event
@@ -1491,36 +1468,15 @@ class WebRLEngine:
         cause_dist = loss_summary.get("cause_distribution", {})
         top_loss_cause = max(cause_dist.items(), key=lambda x: x[1])[0] if cause_dist else "UNKNOWN"
 
-        # 2. Recalibrate pattern confidence weights based on empirical failure rate & memory bank
+        # Proposed hypotheses only — champion policy is never mutated here.
         cur_policy = self.policy_adapter.current_policy
-        recalibrated_weights = {}
+        proposed_weights = {}
         for pattern, conf in cur_policy["pattern_confidences"].items():
             fail_rate = self.loss_analyzer.get_pattern_failure_rate(pattern)
             if fail_rate > 0.4:
-                new_w = max(0.45, round(conf * (1.0 - (fail_rate - 0.3) * 0.5), 3))
+                proposed_weights[pattern] = max(0.45, round(conf * (1.0 - (fail_rate - 0.3) * 0.5), 3))
             else:
-                new_w = min(0.98, round(conf * 1.05, 3))
-            cur_policy["pattern_confidences"][pattern] = new_w
-            recalibrated_weights[pattern] = new_w
-
-        # 3. Macro training loop on ORM: 10 batch replay passes over experience buffer
-        if len(self.orm.experience_buffer) >= 10:
-            for _ in range(10):
-                self.orm._replay_batch(batch_size=min(15, len(self.orm.experience_buffer)))
-
-        # 4. Tune stop-loss and position sizing to reduce future drawdown
-        if self.total_losses > self.total_wins:
-            cur_policy["stop_loss_pct"] = max(0.6, round(cur_policy["stop_loss_pct"] * 0.9, 3))
-            cur_policy["position_size_pct"] = max(0.18, round(cur_policy["position_size_pct"] * 0.92, 3))
-            cur_policy["xgb_risk_threshold"] = max(0.20, round(cur_policy["xgb_risk_threshold"] * 0.95, 3))
-            cur_policy["regime_filter_strict"] = True
-
-        # 5. Re-center base policy with updated macro knowledge
-        self.policy_adapter.base_policy = json.loads(json.dumps(cur_policy))
-
-        # Compute real empirical win-rate delta vs 50% baseline (Bug 10 fix)
-        empirical_win_delta = max(0.0, recent_win_rate - 50.0)
-        reduction_pct = round(min(100.0, (empirical_win_delta / 50.0) * 100.0), 1) if recent_win_rate >= 50.0 else 0.0
+                proposed_weights[pattern] = min(0.98, round(conf * 1.05, 3))
 
         report = {
             "milestone_number": milestone_idx,
@@ -1528,14 +1484,12 @@ class WebRLEngine:
             "win_rate": round(recent_win_rate, 1),
             "top_loss_driver": top_loss_cause,
             "actions_taken": [
-                f"Recalibrated weights across {len(recalibrated_weights)} patterns based on 100-attempt performance",
-                f"Executed 10-batch curriculum replay optimization on Outcome Reward Model (ORM)",
-                f"MuZero MCTS Latent Dynamics recalibrated with negative loss branch pruning",
-                f"Adjusted Stop-Loss to {cur_policy['stop_loss_pct']:.2f}% & Position Size to {cur_policy['position_size_pct']*100:.1f}%",
-                f"Synchronized base policy anchor with 100-attempt loss-minimization weights",
+                "Aggregated loss causes for candidate hypothesis generation",
+                "Queued ORM replay for offline candidate training (not live)",
+                "Champion policy left unchanged — use evolution orchestrator to promote",
             ],
-            "recalibrated_weights": recalibrated_weights,
-            "estimated_loss_reduction": f"{reduction_pct:.1f}%",
+            "proposed_weights": proposed_weights,
+            "policy_mutation_applied": False,
             "timestamp": time.strftime("%H:%M:%S"),
         }
         self.last_milestone_report = report

@@ -667,7 +667,8 @@ function updateWebRLPanel(webrl) {
                 <div style="color: #f59e0b; font-weight: 700; margin-bottom: 4px;">🏆 Milestone #${mr.milestone_number} Optimization Executed (${mr.timestamp})</div>
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; margin-top: 4px;">
                     <div>• <strong>Top Loss Driver Neutralized:</strong> <span style="color: var(--accent-red);">${mr.top_loss_driver.replace(/_/g, ' ')}</span></div>
-                    <div>• <strong>Est. Loss Reduction:</strong> <span style="color: var(--accent-green); font-weight: 700;">${mr.estimated_loss_reduction}</span></div>
+                    ${mr.proposed_weights ? `<div>• <strong>Proposed weight adjustments (not applied):</strong> <span>${Object.keys(mr.proposed_weights).length} patterns reviewed</span></div>` : ''}
+                    ${mr.estimated_loss_reduction ? `<div>• <strong>Hypothesis note:</strong> <span>${mr.estimated_loss_reduction}</span></div>` : ''}
                     <div>• <strong>Win Rate over 100 attempts:</strong> <span>${mr.win_rate}%</span></div>
                 </div>
             `;
