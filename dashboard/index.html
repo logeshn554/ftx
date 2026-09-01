@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Self-Evolving Crypto Trader — $1,000 Live Virtual Account</title>
+    <meta name="description" content="Live real-time Bitcoin pattern identification, HMM regime, XGBoost guard, PPO execution and $1,000 virtual trading engine">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <div class="logo">
+                    <span class="logo-icon">⚡</span>
+                    <h1>Self-Evolving Crypto Trader</h1>
+                    <span class="badge badge-capital">$1,000 Virtual Account</span>
+                    <span class="badge" style="background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.4); color: #f59e0b; font-family: var(--font-mono); font-size: 11px;">Fee: 0.2%</span>
+                </div>
+            </div>
+            <div class="header-center">
+                <div class="status-group">
+                    <div class="status-item">
+                        <span class="status-dot status-dot--active" id="pipeline-dot"></span>
+                        <span class="status-label">Pipeline</span>
+                        <span class="status-value highlight-cyan" id="pipeline-step-text">1. Identifying Patterns</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-dot status-dot--active" id="regime-dot"></span>
+                        <span class="status-label">HMM Regime</span>
+                        <span class="status-value highlight-purple" id="regime-status">Bullish Trend</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-dot status-dot--active" id="circuit-dot"></span>
+                        <span class="status-label">Circuit</span>
+                        <span class="status-value" id="circuit-status">CLOSED</span>
+                    </div>
+                </div>
+            </div>
+            <div class="header-right">
+                <div class="btc-live-ticker">
+                    <span class="ticker-label">REAL BTC/USDT:</span>
+                    <span class="ticker-price" id="btc-ticker">$78,800.00</span>
+                </div>
+                <span class="clock" id="clock">--:--:--</span>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main">
+            <!-- Top Row: $1,000 Account KPIs -->
+            <section class="kpi-row">
+                <div class="kpi-card" id="kpi-equity">
+                    <span class="kpi-label">Virtual Equity</span>
+                    <span class="kpi-value" id="equity-value">$1,000.00</span>
+                    <span class="kpi-delta kpi-delta--positive" id="equity-delta">+0.00%</span>
+                </div>
+                <div class="kpi-card" id="kpi-cash">
+                    <span class="kpi-label">Available Cash</span>
+                    <span class="kpi-value highlight-cyan" id="cash-value">$1,000.00</span>
+                    <span class="kpi-sub">Base: $1,000.00</span>
+                </div>
+                <div class="kpi-card" id="kpi-pnl">
+                    <span class="kpi-label">Realized Net P&amp;L</span>
+                    <span class="kpi-value pnl-positive" id="pnl-value">+$0.00</span>
+                    <span class="kpi-delta" id="pnl-delta">0.00%</span>
+                </div>
+                <div class="kpi-card" id="kpi-trades">
+                    <span class="kpi-label">Completed Attempts</span>
+                    <span class="kpi-value highlight-orange" id="trades-count-val">0</span>
+                    <span class="kpi-sub" id="win-rate-val">Win Rate: —</span>
+                </div>
+                <div class="kpi-card" id="kpi-fees">
+                    <span class="kpi-label">Trading Fees (0.2%)</span>
+                    <span class="kpi-value" style="color: #f59e0b;" id="fees-total-val">$0.00</span>
+                    <span class="kpi-sub">Roundtrip: 0.2%</span>
+                </div>
+                <div class="kpi-card" id="kpi-drawdown">
+                    <span class="kpi-label">Max Drawdown</span>
+                    <span class="kpi-value" id="drawdown-value">0.00%</span>
+                    <div class="drawdown-bar">
+                        <div class="drawdown-fill" id="drawdown-fill" style="width: 0%"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Real-Time Decision Pipeline Workflow -->
+            <section class="pipeline-card card">
+                <div class="card-header">
+                    <h2>🧠 Live Neural Decision &amp; Pattern Identification Pipeline</h2>
+                    <span class="badge badge-active">Live Execution</span>
+                </div>
+                <div class="pipeline-grid">
+                    <!-- Step 1: Pattern Identification -->
+                    <div class="pipeline-step-box" id="step-box-1">
+                        <div class="step-num">STEP 1</div>
+                        <div class="step-title">Pattern Identification</div>
+                        <div class="step-desc" id="pipe-pattern-name">Scanning 5 Candle Formations...</div>
+                        <div class="step-meta">
+                            <span>RSI: <strong id="pipe-rsi">56.4</strong></span>
+                            <span>MACD: <strong id="pipe-macd">+14.2</strong></span>
+                        </div>
+                    </div>
+
+                    <!-- Step 2: HMM Regime & Memory Recall -->
+                    <div class="pipeline-step-box" id="step-box-2">
+                        <div class="step-num">STEP 2</div>
+                        <div class="step-title">Regime &amp; FAISS Recall</div>
+                        <div class="step-desc" id="pipe-regime-name">Bullish Trend (89% conf)</div>
+                        <div class="step-meta">
+                            <span id="pipe-faiss-match">FAISS: Matched 94.2% Ep #1428</span>
+                        </div>
+                    </div>
+
+                    <!-- Step 3: XGBoost Risk Guard -->
+                    <div class="pipeline-step-box" id="step-box-3">
+                        <div class="step-num">STEP 3</div>
+                        <div class="step-title">XGBoost Risk Guard</div>
+                        <div class="step-desc" id="pipe-xgb-status">APPROVED (Risk &lt; 0.35)</div>
+                        <div class="step-meta">
+                            <span>Score: <strong id="pipe-risk-score">0.14 / 0.35 max</strong></span>
+                        </div>
+                    </div>
+
+                    <!-- Step 4: PPO Execution -->
+                    <div class="pipeline-step-box" id="step-box-4">
+                        <div class="step-num">STEP 4</div>
+                        <div class="step-title">PPO Agent Execution</div>
+                        <div class="step-desc" id="pipe-decision-text">BUY (Confidence: 88%)</div>
+                        <div class="step-meta">
+                            <span>Action: <strong class="highlight-green">BUY BTC</strong></span>
+                        </div>
+                    </div>
+
+                    <!-- Step 5: Virtual Account Management -->
+                    <div class="pipeline-step-box" id="step-box-5">
+                        <div class="step-num">STEP 5</div>
+                        <div class="step-title">$1,000 Position &amp; PnL</div>
+                        <div class="step-desc" id="pipe-pnl-status">Live Dynamic Tracking</div>
+                        <div class="step-meta">
+                            <span>Fee: <strong>0.2%</strong></span>
+                            <span>Limit: <strong>35% Max</strong></span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Middle Row: Charts & Interactive Controls -->
+            <section class="charts-row">
+                <div class="card chart-card chart-card--wide">
+                    <div class="card-header">
+                        <h2>Virtual Equity Growth Curve ($1,000 Starting Capital)</h2>
+                        <div class="chart-controls">
+                            <button class="btn-chip active" data-range="live">LIVE</button>
+                        </div>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="equity-chart"></canvas>
+                    </div>
+                </div>
+
+                <div class="card chart-card">
+                    <div class="card-header">
+                        <h2>Virtual Controls &amp; Risk</h2>
+                    </div>
+                    <div class="risk-meters">
+                        <div class="meter">
+                            <span class="meter-label">Active Trade Unrealized P&amp;L</span>
+                            <div class="meter-bar">
+                                <div class="meter-fill meter-fill--green" id="pos-pnl-fill" style="width: 50%"></div>
+                            </div>
+                            <span class="meter-value" id="pos-pnl-text">$0.00 (0.00%)</span>
+                        </div>
+                        <div class="meter">
+                            <span class="meter-label">Capital Utilization</span>
+                            <div class="meter-bar">
+                                <div class="meter-fill meter-fill--blue" id="capital-fill" style="width: 35%"></div>
+                            </div>
+                            <span class="meter-value" id="capital-util-text">$350.00 / $1,000.00</span>
+                        </div>
+                    </div>
+
+                    <!-- Actions -->
+                    <div class="control-actions">
+                        <button class="action-btn btn-reset" id="btn-reset-capital">
+                            <span>💵</span> Reset $1,000 Virtual Capital
+                        </button>
+                        <button class="action-btn btn-evolve" id="btn-trigger-evolve">
+                            <span>🔄</span> Trigger Self-Evolution
+                        </button>
+                        <button class="action-btn btn-circuit" id="btn-toggle-circuit">
+                            <span>🛑</span> Toggle Circuit Breaker
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- WebRL Self-Evolution & Learning Panel -->
+            <section class="webrl-section">
+                <div class="section-header-webrl" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <h2>🧬 WebRL Self-Evolving Online Curriculum RL</h2>
+                        <span class="badge badge-evolving" id="webrl-status-badge">LEARNING</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; font-family: var(--font-mono);">
+                        <span style="color: var(--text-muted);">⏰ Last Evolved At:</span>
+                        <span class="badge" id="last-evolve-time-badge" style="background: rgba(139, 92, 246, 0.2); border: 1px solid rgba(139, 92, 246, 0.5); color: #a78bfa; font-weight: 700; font-size: 12px;">--:--:--</span>
+                        <span id="evolve-time-ago" style="color: var(--text-secondary); font-size: 11px;">(0s ago)</span>
+                    </div>
+                </div>
+
+                <!-- Advanced RL Suite: MuZero MCTS + GRPO + PDRL Deep Exploitation -->
+                <div class="card webrl-card webrl-card--rlsuite" style="margin-bottom: 14px; border-left: 3px solid #6366f1; background: linear-gradient(135deg, rgba(99, 102, 241, 0.09) 0%, rgba(15, 23, 42, 0.85) 100%);">
+                    <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="font-size: 18px;">⚡</span>
+                            <h3 style="color: #818cf8; font-size: 14px; font-weight: 700;">Top RL Architecture: MuZero MCTS + GRPO + PDRL Loss Exploitation</h3>
+                        </div>
+                        <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+                            <span class="badge" id="pdrl-mode-badge" style="background: rgba(239, 68, 68, 0.2); border: 1px solid rgba(239, 68, 68, 0.5); color: #f87171; font-weight: 700;">🎯 PDRL EXPLOITATION READY</span>
+                            <span class="badge" id="muzero-status-badge" style="background: rgba(99, 102, 241, 0.2); border: 1px solid rgba(99, 102, 241, 0.5); color: #a5b4fc;">MuZero 5-Step MCTS</span>
+                            <span class="badge" id="grpo-status-badge" style="background: rgba(16, 185, 129, 0.2); border: 1px solid rgba(16, 185, 129, 0.5); color: #34d399;">GRPO Advantage</span>
+                        </div>
+                    </div>
+                    <div class="webrl-content">
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-bottom: 10px;">
+                            <!-- MuZero MCTS Column -->
+                            <div style="background: rgba(30, 41, 59, 0.6); border: 1px solid rgba(99, 102, 241, 0.3); padding: 10px; border-radius: 8px;">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                                    <span style="font-size: 11px; color: #a5b4fc; font-weight: 700; text-transform: uppercase;">🌲 MuZero MCTS Lookahead</span>
+                                    <span class="badge" id="muzero-depth-badge" style="font-size: 9px; padding: 1px 5px; background: rgba(99, 102, 241, 0.25); color: #c7d2fe;">Depth: 5 Bars</span>
+                                </div>
+                                <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px;">
+                                    <span style="color: var(--text-secondary);">Simulated EV:</span>
+                                    <strong id="muzero-ev-val" style="color: var(--accent-green); font-family: var(--font-mono);">+0.00%</strong>
+                                </div>
+                                <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px;">
+                                    <span style="color: var(--text-secondary);">Pruned Loss Branches:</span>
+                                    <strong id="muzero-pruned-val" style="color: var(--accent-red); font-family: var(--font-mono);">0</strong>
+                                </div>
+                                <div style="font-size: 10px; color: var(--text-muted); font-style: italic;" id="muzero-plan-text">
+                                    Simulating forward price dynamics via tree rollouts to eliminate negative EV actions before execution.
+                                </div>
+                            </div>
+
+                            <!-- GRPO Column -->
+                            <div style="background: rgba(30, 41, 59, 0.6); border: 1px solid rgba(16, 185, 129, 0.3); padding: 10px; border-radius: 8px;">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                                    <span style="font-size: 11px; color: #34d399; font-weight: 700; text-transform: uppercase;">📊 GRPO Relative Advantage</span>
+                                    <span class="badge" style="font-size: 9px; padding: 1px 5px; background: rgba(16, 185, 129, 0.25); color: #a7f3d0;">Group: K=4</span>
+                                </div>
+                                <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px;">
+                                    <span style="color: var(--text-secondary);">Top Relative Adv (A*):</span>
+                                    <strong id="grpo-adv-val" style="color: var(--accent-cyan); font-family: var(--font-mono);">+0.00</strong>
+                                </div>
+                                <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px;">
+                                    <span style="color: var(--text-secondary);">Selected Candidate:</span>
+                                    <strong id="grpo-winner-val" style="color: var(--text-primary); font-family: var(--font-mono);">G1_Standard</strong>
+                                </div>
+                                <div style="font-size: 10px; color: var(--text-muted); font-style: italic;" id="grpo-desc-text">
+                                    Standardizes group trajectory outcomes to pick the optimal risk/reward execution profile.
+                                </div>
+                            </div>
+
+                            <!-- PDRL Exploitation Column -->
+                            <div style="background: rgba(30, 41, 59, 0.6); border: 1px solid rgba(239, 68, 68, 0.3); padding: 10px; border-radius: 8px;">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                                    <span style="font-size: 11px; color: #f87171; font-weight: 700; text-transform: uppercase;">🎯 PDRL / ReMax Loss Mitigator</span>
+                                    <span class="badge" id="pdrl-streak-badge" style="font-size: 9px; padding: 1px 5px; background: rgba(239, 68, 68, 0.25); color: #fca5a5;">Streak: 0</span>
+                                </div>
+                                <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px;">
+                                    <span style="color: var(--text-secondary);">Exploitation State:</span>
+                                    <strong id="pdrl-state-text" style="color: #10b981; font-family: var(--font-mono);">BALANCED</strong>
+                                </div>
+                                <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px;">
+                                    <span style="color: var(--text-secondary);">Downside Loss Penalty (λ):</span>
+                                    <strong style="color: #f87171; font-family: var(--font-mono);">2.20x</strong>
+                                </div>
+                                <div style="font-size: 10px; color: var(--text-muted); font-style: italic;" id="pdrl-rule-text">
+                                    If trading experiences losses, PDRL disables exploration and forces 100% exploitation on high-confidence setups.
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Autonomous RL Goal & Ruin Survival Tracker -->
+                <div class="card webrl-card webrl-card--goal" style="margin-bottom: 14px; border-left: 3px solid #10b981; background: linear-gradient(135deg, rgba(16, 185, 129, 0.08) 0%, rgba(15, 23, 42, 0.8) 100%);">
+                    <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="font-size: 18px;">🎯</span>
+                            <h3 style="color: #10b981; font-size: 14px; font-weight: 700;">Autonomous RL Target: $0.00 (Ruin Defense) ⟷ $1,050.00 (Profit Target)</h3>
+                        </div>
+                        <div style="display: flex; gap: 6px;">
+                            <span class="badge" id="rl-generation-badge" style="background: rgba(16, 185, 129, 0.2); border: 1px solid rgba(16, 185, 129, 0.5); color: #10b981;">Gen #1</span>
+                            <span class="badge badge-evolving" id="goals-won-badge">0 Goals Won</span>
+                        </div>
+                    </div>
+                    <div class="webrl-content">
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; margin-bottom: 10px;">
+                            <div style="background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.25); padding: 6px 10px; border-radius: 6px;">
+                                <span style="font-size: 9px; color: var(--text-muted); text-transform: uppercase; display: block;">Ruin Floor Boundary</span>
+                                <strong style="color: var(--accent-red); font-family: var(--font-mono); font-size: 13px;">$0.00</strong>
+                                <span style="font-size: 10px; color: var(--text-secondary); display: block;" id="ruin-safety-text">Buffer: $1,000.00</span>
+                            </div>
+                            <div style="background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.25); padding: 6px 10px; border-radius: 6px;">
+                                <span style="font-size: 9px; color: var(--text-muted); text-transform: uppercase; display: block;">Current Live Equity</span>
+                                <strong style="color: var(--text-primary); font-family: var(--font-mono); font-size: 13px;" id="goal-current-equity">$1,000.00</strong>
+                                <span style="font-size: 10px; color: var(--accent-cyan); display: block;" id="goal-delta-text">Base: $1,000.00</span>
+                            </div>
+                            <div style="background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.25); padding: 6px 10px; border-radius: 6px;">
+                                <span style="font-size: 9px; color: var(--text-muted); text-transform: uppercase; display: block;">Profit Target Goal</span>
+                                <strong style="color: var(--accent-green); font-family: var(--font-mono); font-size: 13px;" id="goal-target-val">$1,050.00</strong>
+                                <span style="font-size: 10px; color: var(--text-secondary); display: block;" id="goal-dist-text">Distance: $50.00 to Goal</span>
+                            </div>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 4px;">
+                            <span style="color: var(--text-muted);">Target Progress</span>
+                            <span id="goal-progress-pct-text" style="color: var(--accent-green); font-family: var(--font-mono); font-weight: 700;">0.0%</span>
+                        </div>
+                        <div style="position: relative; height: 10px; background: rgba(51, 65, 85, 0.4); border-radius: 5px; overflow: hidden; margin-bottom: 8px;">
+                            <div id="goal-progress-bar" style="height: 100%; width: 0%; background: linear-gradient(90deg, #3b82f6, #10b981); border-radius: 5px; transition: width 0.4s ease;"></div>
+                        </div>
+                        <div id="goal-status-banner" style="font-size: 11px; color: var(--text-secondary); line-height: 1.4; background: rgba(0,0,0,0.25); padding: 6px 10px; border-radius: 6px;">
+                            <em>Autonomous RL Agent is learning live: If equity drops, it cuts position size &amp; tightens stop-loss to avoid $0 ruin; upon reaching $1,050 profit, it locks alpha &amp; evolves weights to the next generation.</em>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 100-Attempt Macro Deep Weight Optimization Card -->
+                <div class="card webrl-card webrl-card--milestone" style="margin-bottom: 16px; border-left: 3px solid #f59e0b; background: linear-gradient(135deg, rgba(245, 158, 11, 0.08) 0%, rgba(15, 23, 42, 0.8) 100%);">
+                    <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="font-size: 18px;">🏆</span>
+                            <h3 style="color: #f59e0b; font-size: 14px; font-weight: 700;">100-Attempt Macro Deep Weight Optimizer</h3>
+                        </div>
+                        <span class="badge" id="milestone-badge" style="background: rgba(245, 158, 11, 0.2); border: 1px solid rgba(245, 158, 11, 0.5); color: #f59e0b;">Milestone #0</span>
+                    </div>
+                    <div class="webrl-content">
+                        <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 6px;">
+                            <span style="color: var(--text-secondary);">Cycle Progress: <strong id="attempt-counter-text" style="color: var(--text-primary); font-family: var(--font-mono);">0 / 100 Attempts</strong></span>
+                            <span id="attempt-countdown-text" style="color: var(--accent-cyan); font-family: var(--font-mono); font-weight: 600;">Next Deep Weight Recalibration in 100 attempts</span>
+                        </div>
+                        <div style="position: relative; height: 12px; background: rgba(51, 65, 85, 0.4); border-radius: 6px; overflow: hidden; margin-bottom: 12px;">
+                            <div id="attempt-progress-bar" style="height: 100%; width: 0%; background: linear-gradient(90deg, #3b82f6, #8b5cf6, #f59e0b); border-radius: 6px; transition: width 0.4s ease;"></div>
+                        </div>
+                        <div id="last-milestone-summary" style="font-size: 11px; color: var(--text-secondary); line-height: 1.5; background: rgba(0,0,0,0.25); padding: 8px 12px; border-radius: 8px; border: 1px dashed rgba(245, 158, 11, 0.3);">
+                            <em>System will perform comprehensive loss decomposition, ORM batch curriculum replay, and recalibrate all pattern weights after 100 completed attempts to minimize loss.</em>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="webrl-grid">
+                    <!-- Loss Analysis Card -->
+                    <div class="card webrl-card webrl-card--analysis">
+                        <div class="card-header">
+                            <h3>🔍 Last Loss Analysis</h3>
+                            <span class="badge" id="total-failures-badge">0 Failures</span>
+                        </div>
+                        <div class="webrl-content">
+                            <div class="failure-display" id="failure-display">
+                                <div class="failure-cause" id="failure-cause">No losses yet</div>
+                                <div class="failure-explanation" id="failure-explanation">Waiting for first loss to analyze...</div>
+                                <div class="failure-fix" id="failure-fix"></div>
+                            </div>
+                            <div class="cause-distribution" id="cause-distribution">
+                                <!-- Populated by JS -->
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Win Analysis & Pattern Memory Card -->
+                    <div class="card webrl-card webrl-card--win" style="border-left: 3px solid #10b981;">
+                        <div class="card-header">
+                            <h3>💎 Win Analysis &amp; Pattern Discovery</h3>
+                            <span class="badge badge-buy" id="total-wins-analyzed-badge">0 Wins Stored</span>
+                        </div>
+                        <div class="webrl-content">
+                            <div class="win-display" id="win-display">
+                                <div class="win-driver" id="win-driver" style="font-size: 15px; font-weight: 700; color: var(--accent-green); margin-bottom: 4px; font-family: var(--font-mono);">Waiting for winning pattern...</div>
+                                <div class="win-explanation" id="win-explanation" style="font-size: 12px; color: var(--text-secondary); line-height: 1.4; margin-bottom: 4px;">Spontaneous and existing winning patterns will be analyzed &amp; stored here.</div>
+                                <div class="win-rule" id="win-rule" style="font-size: 11px; color: var(--accent-cyan); font-style: italic;"></div>
+                            </div>
+                            <div class="pattern-memory-chips" id="pattern-memory-chips" style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px;">
+                                <!-- Populated by JS -->
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- ORM Pre-Trade Score Card -->
+                    <div class="card webrl-card webrl-card--orm">
+                        <div class="card-header">
+                            <h3>📊 Outcome Reward Model (ORM)</h3>
+                            <span class="badge" id="orm-updates-badge">0 updates</span>
+                        </div>
+                        <div class="webrl-content">
+                            <div class="orm-gauge-container">
+                                <div class="orm-gauge">
+                                    <div class="orm-gauge-fill" id="orm-gauge-fill"></div>
+                                    <div class="orm-gauge-label" id="orm-score-display">0.000</div>
+                                </div>
+                                <div class="orm-labels">
+                                    <span class="orm-label-bad">BLOCK</span>
+                                    <span class="orm-label-neutral">NEUTRAL</span>
+                                    <span class="orm-label-good">APPROVE</span>
+                                </div>
+                            </div>
+                            <div class="orm-stats">
+                                <div class="orm-stat">
+                                    <span class="orm-stat-label">Buffer Size</span>
+                                    <span class="orm-stat-value" id="orm-buffer-size">0</span>
+                                </div>
+                                <div class="orm-stat">
+                                    <span class="orm-stat-label">Avg Score</span>
+                                    <span class="orm-stat-value" id="orm-avg-score">0.000</span>
+                                </div>
+                                <div class="orm-stat">
+                                    <span class="orm-stat-label">Weights Norm</span>
+                                    <span class="orm-stat-value" id="orm-weights-norm">0.000</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Self-Evolving Curriculum Card -->
+                    <div class="card webrl-card webrl-card--curriculum">
+                        <div class="card-header">
+                            <h3>📚 Self-Evolving Curriculum</h3>
+                            <span class="badge" id="curriculum-size-badge">0 items</span>
+                        </div>
+                        <div class="webrl-content">
+                            <div class="curriculum-list" id="curriculum-list">
+                                <div class="curriculum-empty">No curriculum items yet. Losses will generate training scenarios.</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- KL-Constrained Policy Adapter -->
+                    <div class="card webrl-card webrl-card--policy">
+                        <div class="card-header">
+                            <h3>🎛️ KL-Constrained Policy</h3>
+                            <span class="badge" id="policy-adaptations-badge">0 adaptations</span>
+                        </div>
+                        <div class="webrl-content">
+                            <div class="kl-meter">
+                                <span class="kl-label">KL Divergence from Base Policy</span>
+                                <div class="kl-bar">
+                                    <div class="kl-fill" id="kl-fill" style="width: 0%"></div>
+                                    <div class="kl-budget-marker" id="kl-budget-marker"></div>
+                                </div>
+                                <div class="kl-values">
+                                    <span id="kl-value">0.000</span>
+                                    <span id="kl-budget-value">/ 0.500 budget</span>
+                                </div>
+                            </div>
+                            <div class="adapted-params" id="adapted-params">
+                                <div class="param-item">
+                                    <span class="param-label">Position Size</span>
+                                    <span class="param-value" id="param-pos-size">35.0%</span>
+                                </div>
+                                <div class="param-item">
+                                    <span class="param-label">Stop-Loss</span>
+                                    <span class="param-value" id="param-stop-loss">1.200%</span>
+                                </div>
+                                <div class="param-item">
+                                    <span class="param-label">Take-Profit</span>
+                                    <span class="param-value" id="param-take-profit">1.800%</span>
+                                </div>
+                                <div class="param-item">
+                                    <span class="param-label">Risk Threshold</span>
+                                    <span class="param-value" id="param-risk-thresh">0.350</span>
+                                </div>
+                            </div>
+                            <div class="pattern-confidences" id="pattern-confidences">
+                                <!-- Populated by JS -->
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Learning Curve -->
+                    <div class="card webrl-card webrl-card--learning">
+                        <div class="card-header">
+                            <h3>📈 Learning Curve (Win Rate Evolution)</h3>
+                            <span class="badge badge-evolving" id="webrl-win-rate">0%</span>
+                        </div>
+                        <div class="webrl-content">
+                            <div class="learning-curve-chart">
+                                <canvas id="learning-curve-canvas"></canvas>
+                            </div>
+                            <div class="learning-stats">
+                                <div class="learn-stat">
+                                    <span class="learn-stat-num" id="webrl-total-trades">0</span>
+                                    <span class="learn-stat-label">Trades</span>
+                                </div>
+                                <div class="learn-stat">
+                                    <span class="learn-stat-num learn-stat-win" id="webrl-total-wins">0</span>
+                                    <span class="learn-stat-label">Wins</span>
+                                </div>
+                                <div class="learn-stat">
+                                    <span class="learn-stat-num learn-stat-loss" id="webrl-total-losses">0</span>
+                                    <span class="learn-stat-label">Losses</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Live Self-Evolution Timestamp Timeline -->
+                <div class="card webrl-card webrl-card--timeline" style="margin-top: 14px; border-left: 3px solid #8b5cf6; background: rgba(15, 23, 42, 0.7);">
+                    <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="font-size: 16px;">⏱️</span>
+                            <h3 style="color: #a78bfa; font-size: 13px; font-weight: 700;">Live Self-Evolution Timestamp Timeline</h3>
+                        </div>
+                        <span class="badge" id="total-evolutions-badge" style="background: rgba(139, 92, 246, 0.2); border: 1px solid rgba(139, 92, 246, 0.4); color: #a78bfa;">0 Cycles</span>
+                    </div>
+                    <div class="webrl-content">
+                        <div id="evolution-timeline-list" style="display: flex; flex-direction: column; gap: 6px; max-height: 140px; overflow-y: auto;">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Bottom Row: Live Position & Profit/Loss History -->
+            <section class="tables-row">
+                <div class="card table-card">
+                    <div class="card-header">
+                        <h2>Live Open Position</h2>
+                        <span class="badge badge-active" id="pos-status-badge">FLAT</span>
+                    </div>
+                    <div class="table-wrapper">
+                        <table id="positions-table">
+                            <thead>
+                                <tr>
+                                    <th>Side</th>
+                                    <th>Allocated</th>
+                                    <th>Entry Price</th>
+                                    <th>Current</th>
+                                    <th>Unrealized P&amp;L</th>
+                                </tr>
+                            </thead>
+                            <tbody id="positions-body">
+                                <tr class="empty-row"><td colspan="5">Scanning for next high-probability pattern...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="card table-card">
+                    <div class="card-header">
+                        <h2>Closed Trades (Profit / Loss Log)</h2>
+                        <span class="badge" id="recent-trades-count">0</span>
+                    </div>
+                    <div class="table-wrapper">
+                        <table id="trades-table">
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Side</th>
+                                    <th>Pattern</th>
+                                    <th>Entry Price</th>
+                                    <th>Exit Price</th>
+                                    <th>Fee (0.2%)</th>
+                                    <th>Net PnL ($)</th>
+                                    <th>Return</th>
+                                    <th>Balance</th>
+                                </tr>
+                            </thead>
+                            <tbody id="trades-body">
+                                <tr class="empty-row"><td colspan="9">No closed trades yet</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="card table-card">
+                    <div class="card-header">
+                        <h2>Live System &amp; Trade Events</h2>
+                    </div>
+                    <div class="event-log">
+                        <div class="log-entries" id="event-log">
+                            <div class="log-entry log-entry--success">
+                                <span class="log-time">10:50:00</span>
+                                <span class="log-msg">Virtual Trading Engine ready with $1,000.00 starting balance.</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

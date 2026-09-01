@@ -1,0 +1,29 @@
+# =============================================================================
+# Stage 8+ Production Configuration Overrides
+# =============================================================================
+log_level: "INFO"
+log_format: "json"
+
+trading:
+  mode: "paper"  # Switch to 'live' when broker credentials are fully verified
+  initial_capital: 100000.0
+  commission_pct: 0.001
+  slippage_pct: 0.0005
+
+risk:
+  max_position_pct: 20.0
+  max_daily_loss_pct: 5.0
+  max_leverage: 1.0
+  max_order_value: 50000.0
+  circuit_breaker_cooldown_seconds: 3600.0
+
+model:
+  min_sharpe_improvement: 0.1
+  max_drawdown_regression: 0.02
+  min_win_rate: 0.45
+
+learning:
+  performance_window_days: 30
+  sharpe_threshold: 0.5
+  retrain_cooldown_hours: 24
+  scheduled_retrain_days: 30

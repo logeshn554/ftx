@@ -1,0 +1,15 @@
+# =============================================================================
+# Stage 1 Backtest Configuration Overrides
+# =============================================================================
+trading:
+  mode: "paper"
+  initial_capital: 100000.0
+  commission_pct: 0.001
+  slippage_pct: 0.0005
+
+data:
+  lookback_days: 730
+  timeframe: "1d"
+
+log_level: "INFO"
+log_format: "dev"

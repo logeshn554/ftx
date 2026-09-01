@@ -1,0 +1,112 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging / builds
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+.env
+.venv*
+
+# IDEs and Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# Pytest & Test coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs and databases
+*.log
+*.sqlite
+*.sqlite3
+*.db
+logs/
+.system_generated/
+
+# Frontend / Node dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ML / DL Model Weights & Binary Checkpoints (Code/Algorithms Only)
+*.pt
+*.pth
+*.bin
+*.onnx
+*.pkl
+*.joblib
+*.h5
+*.hdf5
+*.safetensors
+*.ckpt
+*.weights
+*.pb
+*.tflite
+models/
+checkpoints/
+saved_models/
+model_weights/
+artifacts/
+
+# Large Datasets & Training Data
+data/
+datasets/
+raw_data/
+processed_data/
+*.parquet
+*.feather
+*.arrow
+*.tar
+*.tar.gz
+*.zip
+*.7z
+
+# ML Experiment Trackers
+wandb/
+mlruns/
+.cache/
+*.tmp
+*.index
+
+# Local generated data and caches
+self_evolving_crypto/data/
+self_evolving_crypto/models/
+self_evolving_crypto/memory/
+self_evolving_crypto/results/

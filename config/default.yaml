@@ -1,0 +1,94 @@
+# =============================================================================
+# Self-Evolving Trading System — Default Configuration
+# =============================================================================
+# Override per-environment with backtest.yaml, training.yaml, production.yaml
+# or via environment variables: TRADE__DATA__SYMBOLS='["AAPL","TSLA"]'
+
+# -- Global ------------------------------------------------------------------
+db_url: "sqlite:///trade.db"
+log_level: "INFO"
+log_format: "dev"   # dev | json
+base_dir: "."
+
+# -- Data Pipeline ------------------------------------------------------------
+data:
+  symbols:
+    - AAPL
+    - MSFT
+    - GOOGL
+    - AMZN
+    - TSLA
+  timeframe: "1d"           # 1m, 5m, 15m, 1h, 1d
+  lookback_days: 730        # 2 years of historical data
+  feature_window: 30        # bars in each observation window
+  cache_dir: "data_cache"
+
+  # Data validation thresholds
+  max_price_jump_pct: 20.0
+  min_volume: 100
+  max_missing_bars_pct: 5.0
+
+# -- Trading ------------------------------------------------------------------
+trading:
+  initial_capital: 100000.0
+  commission_pct: 0.001     # 0.1% per trade
+  slippage_pct: 0.0005      # 0.05% slippage
+  default_position_size_pct: 10.0
+  mode: "paper"             # paper | shadow | live
+
+# -- Risk Management ----------------------------------------------------------
+risk:
+  max_position_pct: 20.0    # max % of capital in one position
+  max_daily_loss_pct: 5.0   # daily stop-loss threshold
+  max_leverage: 1.0         # no leverage by default
+  max_order_value: 50000.0  # absolute cap per order
+  max_open_positions: 10
+  min_data_freshness_seconds: 300.0   # 5 min
+  circuit_breaker_cooldown_seconds: 3600.0  # 1 hour
+
+# -- RL Training ---------------------------------------------------------------
+training:
+  algorithm: "PPO"
+  total_timesteps: 500000
+  learning_rate: 0.0003
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  reward_function: "risk_adjusted"  # sharpe | pnl | risk_adjusted | differential_sharpe
+  policy_architecture: "mlp"        # mlp | cnn | lstm
+  net_arch_pi: [256, 128, 64]
+  net_arch_vf: [256, 128, 64]
+  eval_freq: 10000
+  checkpoint_freq: 50000
+
+# -- Model Management ---------------------------------------------------------
+model:
+  registry_dir: "mlflow_registry"
+  min_sharpe_improvement: 0.1
+  max_drawdown_regression: 0.02
+  min_win_rate: 0.45
+  paper_trading_days: 30
+  shadow_trading_days: 14
+
+# -- Learning Agent ------------------------------------------------------------
+learning:
+  performance_window_days: 30
+  sharpe_threshold: 0.5
+  retrain_cooldown_hours: 24
+  max_experience_age_days: 180
+  scheduled_retrain_days: 30
+
+# -- API Server ----------------------------------------------------------------
+api:
+  host: "0.0.0.0"
+  port: 8000
+  debug: false
+  cors_origins:
+    - "http://localhost:3000"
+    - "http://localhost:8000"
