@@ -201,13 +201,17 @@ function handleTelemetry(data) {
     if (data.daily_pnl !== undefined) {
         const pnlEl = document.getElementById('pnl-value');
         const pnlDelta = document.getElementById('pnl-delta');
-        const sign = data.daily_pnl >= 0 ? '+' : '-';
-        pnlEl.textContent = `${sign}$${Math.abs(data.daily_pnl).toFixed(2)}`;
-        pnlEl.className = data.daily_pnl >= 0 ? 'kpi-value pnl-positive' : 'kpi-value pnl-negative';
+        const pnlNum = Number(data.daily_pnl);
+        const isLoss = pnlNum < -0.0001;
+        const isWin = pnlNum > 0.0001;
+        const sign = isWin ? '+' : (isLoss ? '-' : '');
+        pnlEl.textContent = `${sign}$${Math.abs(pnlNum).toFixed(3)}`;
+        pnlEl.className = isWin ? 'kpi-value pnl-positive' : (isLoss ? 'kpi-value pnl-negative' : 'kpi-value');
 
         if (data.daily_return !== undefined) {
-            pnlDelta.textContent = `${(data.daily_return * 100).toFixed(2)}%`;
-            pnlDelta.className = data.daily_return >= 0 ? 'kpi-delta kpi-delta--positive' : 'kpi-delta kpi-delta--negative';
+            const retNum = Number(data.daily_return * 100);
+            pnlDelta.textContent = `${retNum >= 0 ? '+' : ''}${retNum.toFixed(2)}%`;
+            pnlDelta.className = retNum >= 0 ? 'kpi-delta kpi-delta--positive' : 'kpi-delta kpi-delta--negative';
         }
     }
 
@@ -218,7 +222,7 @@ function handleTelemetry(data) {
 
     if (data.total_fees_paid !== undefined) {
         const feesEl = document.getElementById('fees-total-val');
-        if (feesEl) feesEl.textContent = `$${data.total_fees_paid.toFixed(2)}`;
+        if (feesEl) feesEl.textContent = `$${Number(data.total_fees_paid).toFixed(3)}`;
     }
 
     if (data.drawdown !== undefined) {
@@ -258,6 +262,7 @@ function handleTelemetry(data) {
     const pnlFill = document.getElementById('pos-pnl-fill');
     const pnlText = document.getElementById('pos-pnl-text');
     const capText = document.getElementById('capital-util-text');
+    const capFill = document.getElementById('capital-fill');
 
     if (data.open_position) {
         const pos = data.open_position;
@@ -281,8 +286,6 @@ function handleTelemetry(data) {
         pnlText.className = 'meter-value ' + pnlCls;
         pnlFill.style.width = `${Math.min(Math.max((pos.pnl_pct + 2) * 25, 5), 100)}%`;
         pnlFill.className = pos.pnl >= 0 ? 'meter-fill meter-fill--green' : 'meter-fill meter-fill--red';
-
-        capText.textContent = `$${pos.allocated_capital.toFixed(2)} / $1,000.00`;
     } else {
         badge.textContent = 'FLAT';
         badge.className = 'badge';
@@ -290,11 +293,20 @@ function handleTelemetry(data) {
         pnlText.textContent = '$0.00 (0.00%)';
         pnlText.className = 'meter-value';
         pnlFill.style.width = '0%';
-        capText.textContent = `$0.00 / $1,000.00`;
+    }
+
+    if (data.open_position && data.open_position.allocated_capital) {
+        const utilPct = Math.min(100, Math.round((data.open_position.allocated_capital / 10.0) * 100));
+        capFill.style.width = `${utilPct}%`;
+        capText.textContent = `$${data.open_position.allocated_capital.toFixed(2)} / $10.00`;
+        capFill.className = 'meter-fill ' + (utilPct > 35 ? 'meter-fill--orange' : 'meter-fill--blue');
+    } else {
+        capFill.style.width = '0%';
+        capText.textContent = `$0.00 / $10.00`;
     }
 
     // === 5. Closed Trades History (Live Stream) ===
-    if (data.recent_trades && data.recent_trades.length) {
+    if (data.recent_trades !== undefined) {
         renderClosedTrades(data.recent_trades);
     }
 
@@ -730,28 +742,46 @@ async function fetchInitialTrades(retryCount = 0) {
 
 function renderClosedTrades(trades) {
     const tbody = document.getElementById('trades-body');
-    if (!tbody || !trades || !trades.length) return;
+    const countEl = document.getElementById('recent-trades-count');
+    if (!tbody) return;
+
+    if (!trades || !trades.length) {
+        tbody.innerHTML = '<tr class="empty-row"><td colspan="9">Scanning for next pattern / trade completion...</td></tr>';
+        if (countEl) countEl.textContent = '0';
+        return;
+    }
+
     tbody.innerHTML = '';
     trades.forEach(t => {
         const row = document.createElement('tr');
-        const pnlCls = t.pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
+        const pnlVal = Number(t.pnl || 0);
+        const pnlPctVal = Number(t.pnl_pct || 0);
+        const isLoss = pnlVal < -0.0001 || pnlPctVal < -0.001 || t.outcome === 'LOSS';
+        const isWin = (pnlVal > 0.0001 || pnlPctVal > 0.001) && !isLoss;
+        
+        const pnlCls = isWin ? 'pnl-positive' : (isLoss ? 'pnl-negative' : 'pnl-neutral');
         const entryPrice = t.entry_price ? `$${Number(t.entry_price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—';
         const exitPrice = t.exit_price ? `$${Number(t.exit_price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—';
-        const feeFormatted = t.fee !== undefined ? `-$${Number(t.fee).toFixed(2)}` : '-$0.00';
+        const feeFormatted = t.fee !== undefined ? `-$${Number(t.fee).toFixed(3)}` : '-$0.000';
+        const balanceFormatted = t.balance_after !== undefined ? `$${Number(t.balance_after).toFixed(3)}` : '$10.000';
+        const pnlSign = isWin ? '+' : (isLoss ? '-' : '');
+        const pnlDisplay = `${pnlSign}$${Math.abs(pnlVal).toFixed(3)}`;
+        const returnDisplay = `${pnlPctVal >= 0 ? '+' : ''}${pnlPctVal.toFixed(2)}%`;
+
         row.innerHTML = `
             <td>${t.time || '—'}</td>
             <td><span class="badge ${t.side === 'BUY' ? 'badge-buy' : 'badge-sell'}">${t.side}</span></td>
-            <td>${t.pattern || 'Breakout'}</td>
+            <td title="${t.close_reason || ''}">${t.pattern || 'Breakout'}</td>
             <td style="font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary);">${entryPrice}</td>
             <td style="font-family: var(--font-mono); font-size: 11px; color: var(--text-primary);">${exitPrice}</td>
             <td style="font-family: var(--font-mono); font-size: 11px; color: #f59e0b;">${feeFormatted}</td>
-            <td class="${pnlCls}">${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(2)}</td>
-            <td class="${pnlCls}">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%</td>
-            <td><strong>$${(t.balance_after || 1000.0).toFixed(2)}</strong></td>
+            <td class="${pnlCls}"><strong>${pnlDisplay}</strong></td>
+            <td class="${pnlCls}"><strong>${returnDisplay}</strong></td>
+            <td><strong>${balanceFormatted}</strong></td>
         `;
         tbody.appendChild(row);
     });
-    document.getElementById('recent-trades-count').textContent = trades.length;
+    if (countEl) countEl.textContent = trades.length;
 }
 
 function addEvent(level, message) {
@@ -772,8 +802,8 @@ document.getElementById('btn-reset-capital')?.addEventListener('click', async ()
     try {
         const res = await fetch(`${API_BASE}/api/reset_capital`, { method: 'POST' });
         if (res.ok) {
-            addEvent('success', '💵 Virtual Account Reset: Capital restored to $1,000.00');
-            state.equityCurve = [1000.00];
+            addEvent('success', '💵 Virtual Account Reset: Capital restored to $10.00 (Target: +$15.00 Profit)');
+            state.equityCurve = [10.00];
             state.labels = [new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' })];
             equityChart.data.labels = state.labels;
             equityChart.data.datasets[0].data = state.equityCurve;

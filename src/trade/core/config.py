@@ -68,6 +68,9 @@ class TrainingConfig(BaseModel):
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     reward_function: str = "risk_adjusted"  # sharpe | pnl | risk_adjusted | differential_sharpe
+    reward_drawdown_penalty: float = 0.5
+    reward_turnover_penalty: float = 0.05
+    reward_risk_penalty: float = 0.0
     policy_architecture: str = "mlp"  # mlp | cnn | lstm
 
     # Feature extractor

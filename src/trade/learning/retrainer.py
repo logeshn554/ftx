@@ -132,6 +132,9 @@ class CandidateRetrainer:
                 slippage_pct=self.config.trading.slippage_pct,
                 feature_window=self.config.data.feature_window,
                 reward_function=self.config.training.reward_function,
+                reward_drawdown_penalty=self.config.training.reward_drawdown_penalty,
+                reward_turnover_penalty=self.config.training.reward_turnover_penalty,
+                reward_risk_penalty=self.config.training.reward_risk_penalty,
             )
 
             eval_env = TradingEnv(
@@ -142,6 +145,9 @@ class CandidateRetrainer:
                 slippage_pct=self.config.trading.slippage_pct,
                 feature_window=self.config.data.feature_window,
                 reward_function=self.config.training.reward_function,
+                reward_drawdown_penalty=self.config.training.reward_drawdown_penalty,
+                reward_turnover_penalty=self.config.training.reward_turnover_penalty,
+                reward_risk_penalty=self.config.training.reward_risk_penalty,
             )
 
             # 4. Train

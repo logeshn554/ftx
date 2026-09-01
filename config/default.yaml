@@ -61,6 +61,9 @@ training:
   vf_coef: 0.5
   max_grad_norm: 0.5
   reward_function: "risk_adjusted"  # sharpe | pnl | risk_adjusted | differential_sharpe
+  reward_drawdown_penalty: 0.5
+  reward_turnover_penalty: 0.05
+  reward_risk_penalty: 0.0
   policy_architecture: "mlp"        # mlp | cnn | lstm
   net_arch_pi: [256, 128, 64]
   net_arch_vf: [256, 128, 64]

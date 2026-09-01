@@ -209,7 +209,8 @@ class AgentTrainer:
         self._model.learn(
             total_timesteps=self.tc.total_timesteps,
             callback=callbacks,
-            progress_bar=True,
+            # Avoid making the core training path depend on optional UI extras.
+            progress_bar=False,
         )
 
         training_time = time.time() - start_time

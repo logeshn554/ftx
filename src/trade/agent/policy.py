@@ -22,7 +22,10 @@ class MLPFeatureExtractor(BaseFeaturesExtractor):
         self,
         observation_space: spaces.Box,
         hidden_dim: int = 256,
+        features_dim: int | None = None,
     ) -> None:
+        if features_dim is not None:
+            hidden_dim = features_dim
         flat_dim = int(observation_space.shape[0] * observation_space.shape[1])
         features_dim = hidden_dim
 

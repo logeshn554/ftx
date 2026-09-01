@@ -71,6 +71,9 @@ def main():
         slippage_pct=config.trading.slippage_pct,
         feature_window=config.data.feature_window,
         reward_function=config.training.reward_function,
+        reward_drawdown_penalty=config.training.reward_drawdown_penalty,
+        reward_turnover_penalty=config.training.reward_turnover_penalty,
+        reward_risk_penalty=config.training.reward_risk_penalty,
     )
 
     eval_env = TradingEnv(
@@ -81,6 +84,9 @@ def main():
         slippage_pct=config.trading.slippage_pct,
         feature_window=config.data.feature_window,
         reward_function=config.training.reward_function,
+        reward_drawdown_penalty=config.training.reward_drawdown_penalty,
+        reward_turnover_penalty=config.training.reward_turnover_penalty,
+        reward_risk_penalty=config.training.reward_risk_penalty,
     )
 
     # Train

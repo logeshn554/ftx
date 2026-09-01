@@ -21,6 +21,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
+from trade.data.contract import observation_columns
 
 logger = logging.getLogger("real_engine")
 
@@ -56,7 +57,7 @@ class RealInferenceEngine:
             if cfg_path.exists():
                 with open(cfg_path, "r", encoding="utf-8") as f:
                     self.system_config = json.load(f)
-                self.rl_features = self.system_config.get("rl_features", [])
+                self.rl_features = observation_columns(self.system_config.get("rl_features", []))
 
             # 2. Feature Scaler
             fs_path = MODELS_DIR / "feature_scaler_v1.pkl"
@@ -204,15 +205,11 @@ class RealInferenceEngine:
         trade_occurred = False
         side = "HOLD"
         quantity = 0.0
-        pnl = 0.0
 
         if abs(action_val) > 0.25 and loss_risk < 0.35:
             trade_occurred = True
             side = "BUY" if action_val > 0 else "SELL"
             quantity = round(float(abs(action_val) * 0.8), 2)
-            # Future return proxy from dataframe
-            ret = float(row.get("return_1_1m", row.get("return_1_15m", 0.001)))
-            pnl = round(quantity * price * (ret if side == "BUY" else -ret), 2)
 
         return {
             "timestamp": timestamp_str,
@@ -224,7 +221,9 @@ class RealInferenceEngine:
             "trade_occurred": trade_occurred,
             "side": side,
             "quantity": quantity,
-            "pnl": pnl,
+            # A signal is not a completed position. Realized PnL is only
+            # emitted by execution accounting after an actual exit fill.
+            "pnl": 0.0,
             "step_index": self.current_idx,
             "total_steps": self.total_rows,
         }

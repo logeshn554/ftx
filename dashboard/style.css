@@ -1192,3 +1192,16 @@ tr:hover td {
 .log-entry--error .log-msg {
     color: var(--accent-red);
 }
+
+/* Profit & Loss Colors */
+.pnl-positive {
+    color: #10b981 !important;
+    font-weight: 700;
+}
+.pnl-negative {
+    color: #ef4444 !important;
+    font-weight: 700;
+}
+.pnl-neutral {
+    color: #94a3b8 !important;
+}

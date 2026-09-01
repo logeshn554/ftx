@@ -13,6 +13,7 @@ Curriculum Reinforcement Learning" (Qi et al., 2024)
 from __future__ import annotations
 
 import collections
+from trade.intelligence.expected_value import ExpectedValueFilter
 import json
 import math
 import random
@@ -1059,13 +1060,13 @@ class PDRLLossMitigator:
         }
 
 # ============================================================
-# Goal and Ruin Survival Controller ($0.00 Ruin <-> $1,050.00 Goal)
+# Goal and Ruin Survival Controller ($2.00 Ruin <-> $25.00 Goal [+$15 Profit])
 # ============================================================
 
 class GoalAndSurvivalController:
-    """Manages the autonomous self-learning RL goal: achieve $1,050.00 profit and prevent $0.00 ruin."""
+    """Manages the autonomous self-learning RL goal: achieve +$15.00 profit ($25.00 target) and prevent $2.00 ruin."""
 
-    def __init__(self, start_capital: float = 1000.0, profit_target: float = 1050.0, ruin_floor: float = 0.0):
+    def __init__(self, start_capital: float = 10.0, profit_target: float = 25.0, ruin_floor: float = 2.0):
         self.start_capital = start_capital
         self.profit_target = profit_target
         self.ruin_floor = ruin_floor
@@ -1076,15 +1077,15 @@ class GoalAndSurvivalController:
         self.current_equity = start_capital
 
     def check_boundary_and_adapt(self, current_equity: float, webrl_engine) -> Optional[dict]:
-        """Trigger deep self-learning adaptation when nearing $0 ruin or hitting $1,050 profit."""
+        """Trigger deep self-learning adaptation when nearing $2.00 ruin or hitting +$15.00 profit ($25.00)."""
         self.current_equity = current_equity
 
-        # 1. Target Profit Achieved ($1,050.00)
+        # 1. Target Profit Achieved ($25.00 / +$15.00 Profit)
         if current_equity >= self.profit_target:
             self.goals_achieved += 1
             self.generation += 1
             old_target = self.profit_target
-            self.profit_target = round(current_equity + 50.0, 2)  # Step up next milestone target (+50)
+            self.profit_target = round(current_equity + 15.0, 2)  # Step up next milestone target (+15.0)
             
             # RL Weight Reward Boost on all winning patterns
             cur_policy = webrl_engine.policy_adapter.current_policy
@@ -1097,7 +1098,7 @@ class GoalAndSurvivalController:
 
             event = {
                 "type": "PROFIT_GOAL_ACHIEVED",
-                "message": f"🏆 PROFIT TARGET REACHED! Equity reached ${current_equity:.2f} (Target was ${old_target:.2f}) | Promoted to Evolved Generation #{self.generation} | Next Goal: ${self.profit_target:.2f}",
+                "message": f"🏆 PROFIT TARGET REACHED! Equity reached ${current_equity:.2f} (+$15.00 Profit!) | Promoted to Evolved Generation #{self.generation} | Next Goal: ${self.profit_target:.2f}",
                 "generation": self.generation,
                 "current_equity": current_equity,
                 "next_target": self.profit_target,
@@ -1174,7 +1175,7 @@ class QLearningSignalTable:
     MOMENTUM_ZONES = ["STRONG_DOWN", "WEAK_DOWN", "NEUTRAL", "WEAK_UP", "STRONG_UP"]
     ACTIONS = ["BUY", "SELL"]
 
-    def __init__(self, alpha: float = 0.15, gamma: float = 0.0, min_trades: int = 5):
+    def __init__(self, alpha: float = 0.15, gamma: float = 0.0, min_trades: int = 30):
         self.alpha = alpha  # Learning rate
         self.gamma = gamma  # Discount factor (0 for immediate reward)
         self.min_trades = min_trades  # Minimum trades before trusting Q-value (Bug 5/8 fix)
@@ -1226,15 +1227,26 @@ class QLearningSignalTable:
         q_val = self.get_q_value(indicators, action)
         visits = self.get_visit_count(indicators, action)
 
-        # Exploration: if we haven't seen this state enough, explore it
+        # Sparse states are research-only: production defaults to HOLD.
         if visits < self.min_trades:
-            return True, q_val, f"EXPLORING (visits={visits}/{self.min_trades})"
+            return False, q_val, f"INSUFFICIENT_EVIDENCE (visits={visits}/{self.min_trades})"
 
         # Exploitation: strictly non-negative expected value (Bug 5 fix: no negative EV tolerance)
         if q_val >= 0.0:
             return True, q_val, f"Q_POSITIVE (Q={q_val:+.3f}, visits={visits})"
         else:
             return False, q_val, f"Q_NEGATIVE (Q={q_val:+.3f}, visits={visits})"
+
+    def estimate_action(self, indicators: dict, action: str) -> dict:
+        """Return value, confidence and uncertainty without forcing execution."""
+        q_value = self.get_q_value(indicators, action)
+        samples = self.get_visit_count(indicators, action)
+        confidence = min(1.0, samples / max(1, self.min_trades))
+        uncertainty = 1.0 - confidence
+        accepted, _, reason = self.should_trade(indicators, action)
+        return {"action_value": q_value, "confidence": confidence,
+                "sample_count": samples, "uncertainty": uncertainty,
+                "recommendation": action if accepted else "HOLD", "reason": reason}
 
     def update(self, indicators: dict, action: str, reward: float):
         """Update Q-value using temporal difference learning.
@@ -1293,7 +1305,8 @@ class WebRLEngine:
         self.loss_analyzer = LossAnalyzer()
         self.win_analyzer = WinAnalyzer()
         self.pattern_memory = PatternMemoryBank()
-        self.goal_controller = GoalAndSurvivalController(start_capital=1000.0, profit_target=1050.0, ruin_floor=0.0)
+        # Goal and Ruin Defense Controller ($10 Start -> $25 Goal [+$15 Profit])
+        self.goal_controller = GoalAndSurvivalController(start_capital=10.0, profit_target=25.0, ruin_floor=2.0)
         self.curriculum = SelfEvolvingCurriculum()
         self.orm = OutcomeRewardModel()
         self.policy_adapter = KLConstrainedPolicyAdapter()
@@ -1362,7 +1375,7 @@ class WebRLEngine:
         pdrl_res = self.pdrl.register_loss(ctx.pnl, ctx.pnl_pct)
 
         # 4. MuZero Value Prior Negative Calibration
-        self.muzero.update_value_prior(negative_bias=True)
+        # Value-prior updates are candidate-training inputs only.
 
         # 5. Generate curriculum items from the failure
         new_items = self.curriculum.generate_from_failure(failure)
@@ -1370,10 +1383,12 @@ class WebRLEngine:
         # 6. Update ORM with negative outcome
         features = ctx.to_feature_vector()
         outcome_score = max(-1.0, ctx.pnl_pct / 2.0)
-        self.orm.update(features, outcome_score)
+        # ORM updates are deferred to the research candidate queue.
 
         # 7. Adapt policy parameters
-        policy_update = self.policy_adapter.adapt_on_loss(failure)
+        # Production champion is immutable. The diagnostic is queued as a
+        # research hypothesis for a future candidate, never applied live.
+        policy_update = {"applied": False, "hypothesis": failure.failure_cause}
 
         # 8. Replay top curriculum item
         replayed = self.curriculum.replay_top()
@@ -1393,15 +1408,8 @@ class WebRLEngine:
             details=f"Q-Table updated with negative reward ({ctx.pnl_pct:+.2f}%){q_info} | Streak #{pdrl_res['consecutive_losses']}"
         )
 
-        # 9. Check for 100-attempt milestone
+        # Evolution is event-triggered by the external candidate evaluator.
         milestone_report = None
-        if self.total_trades % 100 == 0:
-            milestone_report = self.run_100_attempt_macro_analysis()
-            self.record_evolution(
-                ev_type="100_ATTEMPT_MILESTONE",
-                reason="Macro 100-Attempt Batch Replay",
-                details=f"Recalibrated weights to reduce loss by {milestone_report['estimated_loss_reduction']}"
-            )
 
         return {
             "event": "LOSS_ANALYZED",
@@ -1437,15 +1445,16 @@ class WebRLEngine:
 
         # 3. PDRL & MuZero positive reinforcement
         pdrl_res = self.pdrl.register_win(ctx.pnl, ctx.pnl_pct)
-        self.muzero.update_value_prior(negative_bias=False)
+        # Value-prior updates are candidate-training inputs only.
 
         # 4. Update ORM with positive outcome (scaled by win quality)
         features = ctx.to_feature_vector()
         outcome_score = min(1.0, (ctx.pnl_pct / 1.8) * win_case.quality_score)
-        self.orm.update(features, outcome_score)
+        # ORM updates are deferred to the research candidate queue.
 
         # 5. Adapt & reinforce policy parameters
-        self.policy_adapter.adapt_on_win(ctx)
+        # Production champion is immutable; winning evidence is advisory only.
+        policy_update = {"applied": False, "hypothesis": "preserve_successful_configuration"}
 
         self._update_learning_curve()
 
@@ -1456,15 +1465,8 @@ class WebRLEngine:
             details=f"Reinforced '{ctx.pattern}' | MuZero EV Prior Boosted | PDRL Streak: {pdrl_res['consecutive_losses']}"
         )
 
-        # 6. Check for 100-attempt deep optimization milestone
+        # Evolution is event-triggered by the external candidate evaluator.
         milestone_report = None
-        if self.total_trades % 100 == 0:
-            milestone_report = self.run_100_attempt_macro_analysis()
-            self.record_evolution(
-                ev_type="100_ATTEMPT_MILESTONE",
-                reason="Macro 100-Attempt Batch Replay",
-                details=f"Recalibrated weights to reduce loss by {milestone_report['estimated_loss_reduction']}"
-            )
 
         return {
             "event": "WIN_ANALYZED_AND_STORED",
@@ -1589,9 +1591,9 @@ class WebRLEngine:
         # 4. PDRL Exploitation State Check
         is_exploitation_mandated = self.pdrl.is_exploitation_mandated(current_drawdown)
 
-        # Regime filter: block counter-trend trades in strong regimes
+        # Regime filter: block counter-trend trades in strong regimes (unless executing Inverse strategy)
         regime_blocked = False
-        if indicators:
+        if indicators and "Inverse" not in pattern:
             trend = indicators.get("trend", "FLAT")
             if side == "BUY" and trend == "BEARISH" and regime_conf > 0.7:
                 regime_blocked = True
@@ -1610,8 +1612,19 @@ class WebRLEngine:
             - failure_rate * 0.5
         )
 
-        # Decision: Q-learning gates the trade
-        should_trade = q_should_trade and not regime_blocked
+        # Decision: Q-learning is only one input; a cost-aware EV gate is
+        # mandatory before any order can be proposed.
+        ev_filter = ExpectedValueFilter(minimum_edge=0.0, minimum_confidence=0.55,
+                                        minimum_risk_reward=1.0, cost_margin=1.25)
+        expected_win = max(0.0, float(adapted["take_profit_pct"]))
+        expected_loss = max(0.0, float(adapted["stop_loss_pct"]))
+        estimated_cost = 2.0 * 0.001 + 2.0 * 0.0005
+        p_win = min(1.0, max(0.0, 0.5 + q_value * 0.25 + (pattern_conf - failure_rate) * 0.1))
+        ev_detail, ev_accepted, ev_reason = ev_filter.evaluate(
+            p_win=p_win, expected_win_return=expected_win,
+            expected_loss_return=expected_loss, expected_cost=estimated_cost,
+            confidence=max(regime_conf, pattern_conf), expected_move=abs(muzero_ev) or expected_win)
+        should_trade = q_should_trade and not regime_blocked and ev_accepted
         
         if is_exploitation_mandated and should_trade:
             trade_mode = "Q_EXPLOIT"
@@ -1620,7 +1633,7 @@ class WebRLEngine:
             trade_mode = "Q_SIGNAL"
             alloc_pct = max(0.08, min(0.25, adapted["position_size_pct"]))
         else:
-            trade_mode = f"BLOCKED ({q_reason})" if not q_should_trade else "REGIME_BLOCKED"
+            trade_mode = f"BLOCKED ({q_reason})" if not q_should_trade else ("REGIME_BLOCKED" if regime_blocked else f"EV_BLOCKED ({ev_reason})")
             alloc_pct = 0.0
 
         return {
@@ -1628,6 +1641,10 @@ class WebRLEngine:
             "utility_score": round(utility_score, 3),
             "q_value": round(q_value, 4),
             "q_reason": q_reason,
+            "expected_value": round(ev_detail.expected_value, 6),
+            "expected_cost": round(ev_detail.total_expected_cost, 6),
+            "ev_reason": ev_reason,
+            "decision_reason": "accepted" if should_trade else (ev_reason if not q_should_trade and not regime_blocked else "risk_or_regime_blocked"),
             "pattern_confidence": round(pattern_conf, 3),
             "pattern_failure_rate": round(failure_rate, 3),
             "regime_blocked": regime_blocked,
@@ -1688,4 +1705,3 @@ class WebRLEngine:
             "pdrl": self.pdrl.get_summary(),
             "learning_curve": self.learning_curve[-20:],
         }
-

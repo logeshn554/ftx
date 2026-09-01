@@ -39,9 +39,14 @@ if hasattr(sys.stdout, "reconfigure"):
 # Ensure scripts directory and workspace root are in sys.path
 _SCRIPTS_DIR = Path(__file__).parent.resolve()
 _ROOT_DIR = _SCRIPTS_DIR.parent.resolve()
-for _p in [str(_SCRIPTS_DIR), str(_ROOT_DIR)]:
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+# Put the source package first so ``trade`` cannot resolve to scripts/trade.py.
+_SRC_DIR = str(_ROOT_DIR / "src")
+if str(_SCRIPTS_DIR) in sys.path:
+    sys.path.remove(str(_SCRIPTS_DIR))
+sys.path.insert(0, _SRC_DIR)
+sys.path.insert(1, str(_SCRIPTS_DIR))
+if str(_ROOT_DIR) not in sys.path:
+    sys.path.insert(2, str(_ROOT_DIR))
 
 # WebRL Self-Evolving RL Engine
 try:
@@ -82,17 +87,19 @@ class SystemState:
     def __init__(self):
         self.lock = threading.RLock()
         
-        # Virtual Capital (User specified $100 starting balance)
-        self.initial_capital = 1000.00
-        self.cash_balance = 1000.00
-        self.equity = 1000.00
+        # Virtual Capital ($10.00 starting micro-budget, Goal: $15.00 profit)
+        self.initial_capital = 10.00
+        self.cash_balance = 10.00
+        self.equity = 10.00
         self.daily_pnl = 0.00
-        self.peak_equity = 1000.00
+        self.peak_equity = 10.00
         self.drawdown = 0.00
         self.total_trades_count = 0
         self.winning_trades_count = 0
         self.total_fees_paid = 0.00
-        self.trading_fee_pct = 0.1  # 0.1% trading fee (realistic maker fee)
+        self.trading_fee_pct = 0.1  # 0.1% Trading Fee per leg
+        self.target_profit = 15.00  # Target: Reach +$15.00 profit ($25.00 equity)
+        self.generation = 1         # Self-evolving retraining generation counter
 
         # Live Real Market Telemetry
         self.btc_price = 78800.00
@@ -114,32 +121,30 @@ class SystemState:
 
         # Model Stages & Guards
         self.active_model = "ppo_v1"
-        self.model_stage = "Production"
+        self.model_stage = "Self-Evolving Gen #1"
         self.circuit_breaker = "CLOSED"  # CLOSED | OPEN
-        self.agent_status = "Active — Scanning Market Patterns"
+        self.agent_status = "Active — $10 Capital | Goal: +$15 Profit | Fee: 0.1%"
 
         # Step-by-Step Live Decision Pipeline State
-        self.current_step = "1. Identifying Patterns"
+        self.current_step = "1. Scanning Market Patterns"
         self.detected_pattern = "Bullish Golden Cross Breakout (EMA10 > EMA30)"
         self.pattern_rsi = 56.4
         self.pattern_macd = "+14.2"
         self.current_regime = "Bullish Trend"
         self.regime_confidence = 0.89
-        self.faiss_match_desc = "Matched 94.2% with 2024 episode #1428 (Win Rate: 81%)"
+        self.faiss_match_desc = "FAISS Memory Active"
         self.loss_analyzer_risk_score = 0.14
         self.risk_guard_status = "APPROVED (Risk < 0.35)"
-        self.last_decision = "BUY (Confidence: 0.88)"
+        self.last_decision = "BUY"
 
-        # Position tracking on $1,000 capital
+        # Position tracking on $10 capital
         self.open_position = None  # Dict when active, None when flat
         self.webrl_eval = None
         self.trades_history = []
         self.events = [
-            {"time": time.strftime("%H:%M:%S"), "level": "success", "message": "Virtual account initialized with $1,000.00 starting capital (0.2% Trading Fee active)"},
+            {"time": time.strftime("%H:%M:%S"), "level": "success", "message": "⚡ Virtual account initialized with $10.00 starting capital (0.1% Fee per leg | Target: +$15.00 Profit)"},
+            {"time": time.strftime("%H:%M:%S"), "level": "info", "message": "🧬 Self-Evolving Autonomous Retraining Loop Active: Automatically retrains if account dies until $15 profit is reached"},
             {"time": time.strftime("%H:%M:%S"), "level": "info", "message": "Live Bitcoin data stream connected (Binance live feed)"},
-            {"time": time.strftime("%H:%M:%S"), "level": "info", "message": "PPO v1, HMM Regime & XGBoost Loss Guard connected"},
-            {"time": time.strftime("%H:%M:%S"), "level": "info", "message": "FAISS Memory recall active (32,800 historical vectors)"},
-            {"time": time.strftime("%H:%M:%S"), "level": "info", "message": "WebRL 100-Attempt Macro Deep Weight Optimizer activated"},
         ]
         self.ws_clients = set()
 
@@ -336,7 +341,7 @@ def live_trading_lifecycle_worker():
                 state.agent_status = "Circuit Breaker OPEN — Trading Paused"
                 continue
 
-            # 2. Manage Open Position — ATR-based TP/SL (Gated on Gross Price Move)
+            # 2. Manage Open Position — ATR-based TP/SL with 0.1% Fee Accounting
             if state.open_position is not None:
                 pos = state.open_position
                 current_p = state.btc_price
@@ -344,15 +349,15 @@ def live_trading_lifecycle_worker():
                 qty = pos["quantity"]
                 side = pos["side"]
 
-                # Gross Price difference & percentage (Bug 4 fix: TP/SL evaluates pure price action)
+                # Price difference & Gross PnL
                 price_diff = (current_p - entry_p) if side == "BUY" else (entry_p - current_p)
-                gross_pnl_dollars = round(price_diff * qty, 2)
-                gross_pnl_pct = round((price_diff / max(entry_p, 1.0)) * 100, 2)
+                gross_pnl_dollars = round(price_diff * qty, 4)
+                gross_pnl_pct = round((price_diff / max(entry_p, 1.0)) * 100, 4)
                 
-                # Accounting: entry fee was pre-paid at open; exit fee is calculated for close
-                exit_fee_dollars = round(pos["allocated_capital"] * 0.001, 2)
-                total_roundtrip_fee = round(pos.get("entry_fee", 0.0) + exit_fee_dollars, 2)
-                net_pnl_dollars = round(gross_pnl_dollars - total_roundtrip_fee, 2)
+                # 0.1% Trading Fee Accounting (Entry fee was pre-paid; exit fee calculated for close)
+                exit_fee_dollars = round(pos["allocated_capital"] * 0.001, 4)
+                total_roundtrip_fee = round(pos.get("entry_fee", 0.0) + exit_fee_dollars, 4)
+                net_pnl_dollars = round(gross_pnl_dollars - total_roundtrip_fee, 4)
                 net_pnl_pct = round((net_pnl_dollars / max(pos["allocated_capital"], 1.0)) * 100, 2)
 
                 pos["current_price"] = current_p
@@ -363,19 +368,21 @@ def live_trading_lifecycle_worker():
                 pos["pnl_pct"] = net_pnl_pct
                 pos["duration_bars"] = pos.get("duration_bars", 0) + 1
 
-                # ATR-based TP/SL from entry snapshot (Bug 4 fix: gross_pnl_pct prevents fee-drag false stop-outs)
-                tp_threshold = pos.get("tp_pct", 1.5)
-                sl_threshold = -pos.get("sl_pct", 0.8)
+                # Dynamic scalp TP/SL thresholds
+                tp_threshold = pos.get("tp_pct", 0.015)
+                sl_threshold = -abs(pos.get("sl_pct", 0.012))
 
                 tp_reached = gross_pnl_pct >= tp_threshold
                 sl_reached = gross_pnl_pct <= sl_threshold
-                time_expired = pos["duration_bars"] >= 60  # 60 bars × 3s = 3 minutes hold
+                time_expired = pos["duration_bars"] >= 6  # 6 bars × 3s = 18s scalp hold
 
                 if tp_reached or sl_reached or time_expired:
-                    # Bug 2 & 3 fix: restore cash + gross PnL - exit fee (entry fee was already deducted at open)
-                    state.cash_balance = round(state.cash_balance + pos["allocated_capital"] + gross_pnl_dollars - exit_fee_dollars, 2)
-                    state.daily_pnl = round(state.cash_balance - state.initial_capital, 2)
-                    state.total_fees_paid = round(state.total_fees_paid + exit_fee_dollars, 2)
+                    close_tag = "🎯 TAKE-PROFIT HIT" if tp_reached else ("🛑 STOP-LOSS HIT" if sl_reached else "⏱️ TIME EXPIRED")
+                    
+                    # Restore cash + gross PnL - exit fee (4-decimal precision to accurately track sub-cent fees)
+                    state.cash_balance = round(state.cash_balance + pos["allocated_capital"] + gross_pnl_dollars - exit_fee_dollars, 4)
+                    state.daily_pnl = round(state.cash_balance - state.initial_capital, 4)
+                    state.total_fees_paid = round(state.total_fees_paid + exit_fee_dollars, 4)
                     state.total_trades_count += 1
                     if net_pnl_dollars >= 0:
                         state.winning_trades_count += 1
@@ -408,38 +415,17 @@ def live_trading_lifecycle_worker():
                     webrl_result = {}
                     if outcome_type == "LOSS":
                         webrl_result = webrl.on_loss(trade_ctx, entry_indicators=entry_indicators)
-                        q_val = webrl_result.get("q_value_after", 0)
                         state.events.insert(0, {
                             "time": time.strftime("%H:%M:%S"),
                             "level": "error",
-                            "message": f"Q-LEARNING LOSS: {webrl_result.get('failure', {}).get('failure_cause', '?')} | PnL: {net_pnl_pct:+.2f}% | {webrl_result.get('failure', {}).get('explanation', '')}"[:200]
-                        })
-                        state.events.insert(0, {
-                            "time": time.strftime("%H:%M:%S"),
-                            "level": "info",
-                            "message": f"Q-Table Updated: {webrl_result.get('curriculum_items_generated', 0)} curriculum items | KL={webrl_result.get('policy_update', {}).get('kl_distance', 0):.3f}"
+                            "message": f"Q-LEARNING LOSS: {pos.get('pattern')} -> Penalized in Q-Table | PnL: {net_pnl_pct:+.2f}%"
                         })
                     else:
                         webrl_result = webrl.on_win(trade_ctx, entry_indicators=entry_indicators)
-                        win_info = webrl_result.get("win_analysis", {})
                         state.events.insert(0, {
                             "time": time.strftime("%H:%M:%S"),
                             "level": "success",
-                            "message": f"💎 Q-LEARNING WIN: {pos.get('pattern', 'Pattern')} | Driver: {win_info.get('profit_driver', 'TREND')} | Quality: {int(win_info.get('quality_score', 0.8)*100)}% | PnL: {net_pnl_pct:+.2f}%"[:220]
-                        })
-                        state.events.insert(0, {
-                            "time": time.strftime("%H:%M:%S"),
-                            "level": "info",
-                            "message": f"🧠 Q-Table reinforced: Positive reward for {pos.get('pattern', '')} in {state.current_regime} regime"
-                        })
-
-                    # Check for 100-Attempt Deep Weight Optimization Milestone
-                    if webrl_result.get("milestone_report"):
-                        mr = webrl_result["milestone_report"]
-                        state.events.insert(0, {
-                            "time": time.strftime("%H:%M:%S"),
-                            "level": "success",
-                            "message": f"🏆 100-ATTEMPT MILESTONE #{mr['milestone_number']}: WebRL deeply analyzed 100 attempts! Top Loss Driver: {mr['top_loss_driver']} | Weights recalibrated, Est. Loss Reduction: {mr['estimated_loss_reduction']}"
+                            "message": f"💎 Q-LEARNING WIN: {pos.get('pattern')} -> Reinforced in Q-Table | PnL: {net_pnl_pct:+.2f}%"
                         })
 
                     closed_trade = {
@@ -451,31 +437,63 @@ def live_trading_lifecycle_worker():
                         "quantity": qty,
                         "allocated": pos["allocated_capital"],
                         "fee": total_roundtrip_fee,
-                        "pnl": net_pnl_dollars,
-                        "gross_pnl": gross_pnl_dollars,
+                        "pnl": round(net_pnl_dollars, 4),
+                        "gross_pnl": round(gross_pnl_dollars, 4),
                         "pnl_pct": net_pnl_pct,
                         "outcome": outcome_type,
                         "balance_after": state.cash_balance,
                         "pattern": pos["pattern"],
+                        "close_reason": close_tag,
                         "webrl_feedback": webrl_result.get("event", ""),
                     }
                     state.trades_history.insert(0, closed_trade)
-                    if len(state.trades_history) > 40:
+                    if len(state.trades_history) > 50:
                         state.trades_history.pop()
 
+                    # Explicit user-facing BOUGHT/STOPLOSS/SOLD event log
                     state.events.insert(0, {
                         "time": time.strftime("%H:%M:%S"),
                         "level": log_lvl,
-                        "message": f"CLOSED {side} {qty:.5f} BTC @ ${current_p:,.2f} | {outcome_type}: {'+' if net_pnl_dollars >= 0 else ''}${net_pnl_dollars:.2f} ({net_pnl_pct:+.2f}%) [Fee: -${total_roundtrip_fee:.2f}] | Balance: ${state.cash_balance:.2f}"
+                        "message": f"{close_tag}: SOLD/CLOSED {side} {qty:.6f} BTC @ ${current_p:,.2f} | {outcome_type}: {'+' if net_pnl_dollars >= 0 else ''}${net_pnl_dollars:.2f} ({net_pnl_pct:+.2f}%) [Fee: ${total_roundtrip_fee:.3f}] | Balance: ${state.cash_balance:.2f}"
                     })
 
                     state.open_position = None
-                    state.current_step = "5. Trade Closed & WebRL Evaluated -> Scanning New Patterns"
+                    state.current_step = f"5. {close_tag} -> Scanning Next Pattern (Balance: ${state.cash_balance:.2f})"
                 else:
-                    state.current_step = f"4. Position Active ({side} {qty:.5f} BTC) — Net PnL: {'+' if net_pnl_dollars >= 0 else ''}${net_pnl_dollars:.2f} ({net_pnl_pct:+.2f}%) [Fee: ${total_roundtrip_fee:.2f}]"
+                    state.current_step = f"4. Active Position ({side} {qty:.6f} BTC @ ${entry_p:,.2f}) -> PnL: {'+' if net_pnl_dollars >= 0 else ''}${net_pnl_dollars:.2f} ({net_pnl_pct:+.2f}%) [Fee: ${total_roundtrip_fee:.3f}] | TP: +{tp_threshold:.3f}%, SL: {sl_threshold:.3f}%"
 
-            # 3. If Flat (No open position), Run Real Technical Analysis Pipeline
+            # 3. If Flat (No open position), Check Account Health & Run Trading Pipeline
             else:
+                # 3a. AUTONOMOUS RETRAINING LOOP ON ACCOUNT DEATH (Balance < $2.00)
+                if state.cash_balance < 2.00:
+                    state.generation += 1
+                    state.model_stage = f"Self-Evolving Gen #{state.generation}"
+                    
+                    # Retrain Q-table policy with all historical loss data
+                    macro_report = webrl.run_100_attempt_macro_analysis()
+                    
+                    state.events.insert(0, {
+                        "time": time.strftime("%H:%M:%S"),
+                        "level": "error",
+                        "message": f"💀 ACCOUNT DIED (Balance ${state.cash_balance:.2f} < $2.00) -> 🧬 AUTONOMOUS RETRAINING TRIGGERED (Generation #{state.generation}) | Policy weights re-optimized!"
+                    })
+                    state.events.insert(0, {
+                        "time": time.strftime("%H:%M:%S"),
+                        "level": "info",
+                        "message": f"🔄 Account Reset to $10.00 Capital for Gen #{state.generation} -> Continuing until +$15.00 Profit is achieved!"
+                    })
+                    
+                    # Reset account back to $10.00 for the newly retrained generation
+                    state.cash_balance = 10.00
+                    state.initial_capital = 10.00
+                    state.equity = 10.00
+                    state.agent_status = f"Gen #{state.generation} Retrained & Active — Target: +$15 Profit"
+
+                # 3b. PROFIT TARGET REACHED CHECK (+$15 Profit -> $25 Equity)
+                profit_so_far = round(state.cash_balance - state.initial_capital, 2)
+                if profit_so_far >= state.target_profit:
+                    state.agent_status = f"🏆 TARGET REACHED: +${profit_so_far:.2f} PROFIT! (Equity: ${state.cash_balance:.2f})"
+
                 # Evaluate every 2 ticks (6 seconds between scans)
                 if cycle_counter % 2 == 0:
                     # Real indicator-based signal detection
@@ -490,72 +508,51 @@ def live_trading_lifecycle_worker():
                     price = state.btc_price
 
                     # Determine signal and side from REAL indicators
-                    signal_name = "No Clear Signal"
-                    signal_detail = ""
-                    signal_side = None
-                    signal_strength = 0.0
-
-                    # Signal 1: EMA Golden Cross
-                    if ema10 >= ema30 and momentum >= 0:
-                        signal_name = "EMA Golden Cross"
-                        signal_detail = f"EMA10({ema10:.0f}) >= EMA30({ema30:.0f}), RSI={rsi:.1f}, Mom={momentum:+.3f}%"
+                    if rsi <= 40:
+                        signal_name = "RSI Deep Oversold Rebound"
+                        signal_detail = f"RSI={rsi:.1f} (Oversold), Momentum={momentum:+.3f}%"
                         signal_side = "BUY"
-                        signal_strength = min(1.0, 0.45 + abs(ema10 - ema30) / max(ema30, 1) * 2000 + abs(momentum) * 5)
-
-                    # Signal 2: EMA Death Cross
-                    elif ema10 < ema30 and momentum <= 0:
-                        signal_name = "EMA Death Cross"
-                        signal_detail = f"EMA10({ema10:.0f}) < EMA30({ema30:.0f}), RSI={rsi:.1f}, Mom={momentum:+.3f}%"
+                        signal_strength = 0.75
+                    elif rsi >= 60:
+                        signal_name = "RSI Overbought Mean Reversion"
+                        signal_detail = f"RSI={rsi:.1f} (Overbought), Momentum={momentum:+.3f}%"
                         signal_side = "SELL"
-                        signal_strength = min(1.0, 0.45 + abs(ema30 - ema10) / max(ema30, 1) * 2000 + abs(momentum) * 5)
-
-                    # Signal 3: RSI Oversold Mean Reversion
-                    elif rsi <= 45:
-                        signal_name = "RSI Oversold Bounce"
-                        signal_detail = f"RSI={rsi:.1f} (Oversold), Turning Mom: {momentum:+.3f}%"
-                        signal_side = "BUY"
-                        signal_strength = min(1.0, (50 - rsi) / 20.0 + 0.4)
-
-                    # Signal 4: RSI Overbought Mean Reversion
-                    elif rsi >= 55:
-                        signal_name = "RSI Overbought Reversal"
-                        signal_detail = f"RSI={rsi:.1f} (Overbought), Fading Mom: {momentum:+.3f}%"
-                        signal_side = "SELL"
-                        signal_strength = min(1.0, (rsi - 50) / 20.0 + 0.4)
-
-                    # Signal 5: Bollinger Lower Band Support
-                    elif bb_pos == "BELOW_LOWER" or (price <= ind["bb_mid"] and trend != "BEARISH"):
-                        signal_name = "Bollinger Lower Support"
-                        signal_detail = f"Price near lower BB, Width={ind['bb_width_pct']:.3f}%"
-                        signal_side = "BUY"
-                        signal_strength = 0.55
-
-                    # Signal 6: Bollinger Upper Band Resistance
-                    elif bb_pos == "ABOVE_UPPER" or (price >= ind["bb_mid"] and trend != "BULLISH"):
-                        signal_name = "Bollinger Upper Resistance"
-                        signal_detail = f"Price near upper BB, Width={ind['bb_width_pct']:.3f}%"
-                        signal_side = "SELL"
-                        signal_strength = 0.55
-
-                    # Signal 7: Momentum Velocity Continuation
-                    elif abs(momentum) >= 0.01:
-                        signal_side = "BUY" if momentum > 0 else "SELL"
-                        signal_name = f"Momentum {'Expansion' if signal_side == 'BUY' else 'Breakdown'}"
-                        signal_detail = f"Velocity={momentum:+.3f}%, RSI={rsi:.1f}"
-                        signal_strength = 0.50
+                        signal_strength = 0.75
+                    elif ema10 >= ema30:
+                        if momentum >= 0:
+                            signal_name = "EMA Bullish Golden Cross"
+                            signal_detail = f"EMA10({ema10:.0f}) >= EMA30({ema30:.0f}), RSI={rsi:.1f}"
+                            signal_side = "BUY"
+                            signal_strength = min(0.95, 0.60 + abs(momentum) * 10)
+                        else:
+                            signal_name = "Bullish Pullback Support"
+                            signal_detail = f"EMA Trend Bullish, Pullback RSI={rsi:.1f}"
+                            signal_side = "BUY"
+                            signal_strength = 0.55
+                    else:
+                        if momentum <= 0:
+                            signal_name = "EMA Bearish Death Cross"
+                            signal_detail = f"EMA10({ema10:.0f}) < EMA30({ema30:.0f}), RSI={rsi:.1f}"
+                            signal_side = "SELL"
+                            signal_strength = min(0.95, 0.60 + abs(momentum) * 10)
+                        else:
+                            signal_name = "Bearish Counter-Rally Rejection"
+                            signal_detail = f"EMA Trend Bearish, Rejection RSI={rsi:.1f}"
+                            signal_side = "SELL"
+                            signal_strength = 0.55
 
                     # Update dashboard display
                     state.current_regime = trend if trend != "FLAT" else ("Bullish Bias" if momentum >= 0 else "Bearish Bias")
-                    state.regime_confidence = round(signal_strength, 2) if signal_side else 0.0
-                    state.detected_pattern = f"{signal_name} ({signal_detail})" if signal_side else "Scanning... (No signal)"
+                    state.regime_confidence = round(signal_strength, 2)
+                    state.detected_pattern = f"{signal_name} ({signal_detail})"
 
-                    # Execute on detected directional signals
+                    # Execute on detected directional signals (DIRECT STRATEGY: BUY means BUY, SELL means SELL)
                     if signal_side and signal_strength >= 0.20:
-                        # ATR-based TP/SL calibrated for positive expectancy (TP = 3× ATR, SL = 1.8× ATR)
-                        tp_pct = max(0.35, round(atr_pct * 3.0, 3))
-                        sl_pct = max(0.20, round(atr_pct * 1.8, 3))
+                        # Dynamic Scalp TP/SL calibrated for realistic micro moves
+                        tp_pct = max(0.015, min(0.08, round(max(atr_pct, 0.01) * 1.5, 4)))
+                        sl_pct = max(0.012, min(0.06, round(max(atr_pct, 0.01) * 1.2, 4)))
 
-                        # Evaluate through WebRL Q-learning
+                        # Evaluate through WebRL Q-learning for the direct signal side
                         chosen_eval = webrl.evaluate_trade(
                             pattern=signal_name, regime=trend, regime_conf=signal_strength,
                             rsi=rsi, macd=state.pattern_macd, side=signal_side,
@@ -570,20 +567,20 @@ def live_trading_lifecycle_worker():
 
                         mode_tag = f"[{chosen_eval.get('trade_mode', 'RL_SIGNAL')}]"
                         state.risk_guard_status = f"{mode_tag} Q={q_value:+.3f} ATR={atr_pct:.3f}%"
-                        state.last_decision = f"{signal_side} ({mode_tag} Q={q_value:+.3f})"
-                        state.current_step = f"1. Signal: {signal_name} -> {mode_tag} (ATR={atr_pct:.3f}%, Q={q_value:+.3f})"
+                        state.last_decision = f"{signal_side} ({signal_name}, {mode_tag} Q={q_value:+.3f})"
+                        state.current_step = f"1. Signal: {signal_name} -> {signal_side} {mode_tag} (ATR={atr_pct:.3f}%, Q={q_value:+.3f})"
 
                         state.faiss_match_desc = f"Q-Table State: trend={trend}, rsi_zone={rsi_zone}, bb={bb_pos} | ATR={atr_pct:.3f}%"
 
-                        # 4. Execute if Q-learning approved and capital available
+                        # 4. Execute trade on $10 budget if Q-learning approved
                         if chosen_eval.get("should_trade", False):
-                            alloc_pct = chosen_eval["adapted_position_pct"]
-                            alloc_capital = round(min(state.cash_balance * alloc_pct, state.cash_balance * 0.25), 2)  # Max 25% per trade
-                            if alloc_capital >= 5.0:
-                                entry_fee = round(alloc_capital * 0.001, 2)  # 0.1% entry fee (Bug 1 fix: pre-pay at open)
-                                trade_qty = round(alloc_capital / state.btc_price, 6)
-                                state.cash_balance = round(state.cash_balance - alloc_capital - entry_fee, 2)
-                                state.total_fees_paid = round(state.total_fees_paid + entry_fee, 2)
+                            alloc_pct = chosen_eval.get("adapted_position_pct", 0.25)
+                            alloc_capital = round(max(0.50, min(state.cash_balance * alloc_pct, state.cash_balance * 0.50)), 2)
+                            if alloc_capital >= 0.50 and state.cash_balance >= alloc_capital:
+                                entry_fee = round(alloc_capital * 0.001, 4)  # 0.1% entry fee
+                                trade_qty = round(alloc_capital / max(state.btc_price, 1.0), 6)
+                                state.cash_balance = round(state.cash_balance - alloc_capital - entry_fee, 4)
+                                state.total_fees_paid = round(state.total_fees_paid + entry_fee, 4)
 
                                 state.open_position = {
                                     "symbol": "BTC/USDT",
@@ -610,29 +607,28 @@ def live_trading_lifecycle_worker():
                                     "entry_indicators": dict(ind),  # snapshot
                                 }
 
+                                action_verb = "🟢 BOUGHT" if signal_side == "BUY" else "🔴 SHORTED (SELL)"
                                 state.events.insert(0, {
                                     "time": time.strftime("%H:%M:%S"),
                                     "level": "info",
-                                    "message": f"EXECUTED {signal_side}: ${alloc_capital:.2f} ({alloc_pct:.0%}) {mode_tag} | Signal: {signal_name} | ATR={atr_pct:.3f}% TP={tp_pct:.2f}% SL={sl_pct:.2f}% | Fee: ${entry_fee:.2f} | Q={q_value:+.3f}"
+                                    "message": f"{action_verb}: {signal_side} {trade_qty:.6f} BTC @ ${state.btc_price:,.2f} [Alloc: ${alloc_capital:.2f}, Fee: ${entry_fee:.3f}] | Signal: {signal_name} | TP=+{tp_pct:.3f}% SL=-{sl_pct:.3f}% | Q={q_value:+.3f}"
                                 })
-                                state.current_step = f"3. RL Order: {signal_side} {trade_qty:.5f} BTC @ ${state.btc_price:,.2f} ({mode_tag})"
+                                state.current_step = f"3. RL Order: {signal_side} {trade_qty:.6f} BTC @ ${state.btc_price:,.2f} ({mode_tag})"
                     else:
                         if not signal_side:
                             state.current_step = "2. Scanning... No clear directional signal"
-                        elif atr_pct < min_atr_threshold:
-                            state.current_step = f"2. Waiting: ATR too low ({atr_pct:.3f}% < {min_atr_threshold:.1f}% min)"
                         else:
                             state.current_step = f"2. Signal weak: {signal_name} (strength={signal_strength:.2f})"
 
             # 5. Compute Total Equity
             unrealized = state.open_position["pnl"] if state.open_position else 0.00
             allocated = state.open_position["allocated_capital"] if state.open_position else 0.00
-            state.equity = round(state.cash_balance + allocated + unrealized, 2)
+            state.equity = round(state.cash_balance + allocated + unrealized, 4)
             if state.equity > state.peak_equity:
                 state.peak_equity = state.equity
             state.drawdown = round(max(0.0, (state.peak_equity - state.equity) / state.peak_equity), 4)
 
-            # Check boundary self-learning ($1,050.00 Target Goal or Ruin Mitigation)
+            # Check boundary self-learning ($25.00 Target Goal [+$15.00 Profit] or $2.00 Ruin Mitigation)
             boundary_ev = webrl.check_equity_boundary(state.equity)
             if boundary_ev:
                 state.events.insert(0, {
@@ -695,7 +691,7 @@ class UnifiedRequestHandler(http.server.SimpleHTTPRequestHandler):
             self.handle_websocket_handshake()
             return
 
-        if path == "/favicon.ico":
+        if path == "/favicon.ico" or path.startswith("/.well-known/"):
             self.send_response(204)
             self.end_headers()
             return
@@ -771,20 +767,22 @@ class UnifiedRequestHandler(http.server.SimpleHTTPRequestHandler):
 
         if path in ["/api/reset_capital", "/trading/reset"]:
             with state.lock:
-                state.initial_capital = 1000.00
-                state.cash_balance = 1000.00
-                state.equity = 1000.00
-                state.peak_equity = 1000.00
-                state.daily_pnl = 0.00
+                state.initial_capital = 10.00
+                state.cash_balance = 10.00
+                state.equity = 10.00
+                state.peak_equity = 10.00
                 state.drawdown = 0.00
+                state.daily_pnl = 0.00
                 state.total_trades_count = 0
                 state.winning_trades_count = 0
+                state.total_fees_paid = 0.00
+                state.open_position = None
                 state.events.insert(0, {
                     "time": time.strftime("%H:%M:%S"),
                     "level": "success",
-                    "message": "Virtual Account Reset: Capital restored to $1,000.00"
+                    "message": "💵 Virtual Account Reset: Capital restored to $10.00 (Target: +$15.00 Profit)"
                 })
-            self.send_json({"status": "reset", "balance": 1000.00})
+            self.send_json({"status": "reset", "balance": 10.00})
             return
 
         if path in ["/api/circuit_breaker", "/risk/circuit_breaker"]:
@@ -849,7 +847,9 @@ class UnifiedRequestHandler(http.server.SimpleHTTPRequestHandler):
                     "daily_return": round((state.equity - state.initial_capital) / state.initial_capital, 4),
                     "drawdown": state.drawdown,
                     "total_trades": state.total_trades_count,
-                    "win_rate": 80.0,
+                    "win_rate": round(state.winning_trades_count / max(1, state.total_trades_count) * 100, 1),
+                    "total_fees_paid": state.total_fees_paid,
+                    "trading_fee_pct": state.trading_fee_pct,
                     "current_step": state.current_step,
                     "detected_pattern": state.detected_pattern,
                     "rsi": state.pattern_rsi,
@@ -862,6 +862,9 @@ class UnifiedRequestHandler(http.server.SimpleHTTPRequestHandler):
                     "last_decision": state.last_decision,
                     "open_position": state.open_position,
                     "circuit_breaker": state.circuit_breaker,
+                    "recent_trades": state.trades_history[:15],
+                    "events": state.events[:15],
+                    "webrl": webrl.get_full_telemetry(state.equity),
                 }
             }
         send_ws_frame(sock, json.dumps(init_payload))
@@ -899,13 +902,13 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 def run_server(port=8080):
     server = ThreadedHTTPServer(("0.0.0.0", port), UnifiedRequestHandler)
 
-    print("============================================================")
-    print(f"Self-Evolving Crypto Trading Command Center is LIVE!")
-    print(f"Virtual Starting Capital: $1,000.00")
-    print(f"Dashboard URL: http://localhost:{port}/")
-    print(f"Alternative:   http://localhost:{port}/dashboard/")
-    print(f"WebSocket URL: ws://localhost:{port}/ws")
-    print("============================================================")
+    print(f"============================================================")
+    print(f"⚡ Self-Evolving Crypto Trading Command Center is LIVE!")
+    print(f"💰 Virtual Starting Capital: ${state.initial_capital:.2f} (Target: +$15.00 Profit | Goal: $25.00)")
+    print(f"📊 Dashboard URL: http://localhost:{port}/")
+    print(f"🌐 Alternative:   http://127.0.0.1:{port}/")
+    print(f"🔌 WebSocket URL: ws://localhost:{port}/ws")
+    print(f"============================================================")
     sys.stdout.flush()
     
     # Start live trading lifecycle worker in background

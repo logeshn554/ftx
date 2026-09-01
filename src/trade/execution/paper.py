@@ -40,7 +40,8 @@ class PaperBroker(Broker):
         if symbol in self._positions:
             pos = self._positions[symbol]
             pos.current_price = price
-            pos.unrealized_pnl = (price - pos.avg_entry_price) * pos.quantity
+            # Mark to the observable market price; do not use a future fill.
+            pos.unrealized_pnl = (price - pos.avg_entry_price) * pos.quantity - pos.entry_fees
 
     def submit_order(self, order: Order) -> Order:
         """Simulate order execution."""
@@ -79,12 +80,16 @@ class PaperBroker(Broker):
                 total_qty = pos.quantity + order.quantity
                 pos.avg_entry_price = total_cost / total_qty
                 pos.quantity = total_qty
+                pos.entry_fees += commission
+                pos.slippage_cost += abs(fill_price - price) * order.quantity
             else:
                 self._positions[order.symbol] = Position(
                     symbol=order.symbol,
                     quantity=order.quantity,
                     avg_entry_price=fill_price,
                     current_price=price,
+                    entry_fees=commission,
+                    slippage_cost=abs(fill_price - price) * order.quantity,
                 )
 
         elif order.side == OrderSide.SHORT:
@@ -97,9 +102,13 @@ class PaperBroker(Broker):
 
             pos = self._positions[order.symbol]
             sell_qty = min(order.quantity, pos.quantity)
+            # Allocate entry fees for partial closes, then recognize net PnL
+            # from actual entry/exit fills only.
+            entry_fee = pos.entry_fees * sell_qty / pos.quantity
             proceeds = sell_qty * fill_price - commission
 
-            pos.realized_pnl += (fill_price - pos.avg_entry_price) * sell_qty
+            pos.realized_pnl += (fill_price - pos.avg_entry_price) * sell_qty - entry_fee - commission
+            pos.entry_fees -= entry_fee
             pos.quantity -= sell_qty
             self._cash += proceeds
 
