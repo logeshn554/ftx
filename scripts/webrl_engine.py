@@ -654,7 +654,7 @@ class KLConstrainedPolicyAdapter:
         # Compute KL divergence between proposed and base
         kl = self._compute_kl(proposed)
 
-        # Champion policy is immutable.  Proposals are returned for candidate
+        # Champion policy is immutable. Proposals are returned for candidate
         # generation only and must never be applied to current_policy live.
         self.total_adaptations += 1
         update_record = {
@@ -662,7 +662,7 @@ class KLConstrainedPolicyAdapter:
             "failure_cause": cause,
             "pattern": pattern,
             "severity": round(severity, 3),
-            "kl_distance": round(self._compute_kl(proposed), 4),
+            "kl_distance": round(kl, 4),
             "kl_budget": self.kl_budget,
             "proposed_position_size": round(proposed["position_size_pct"], 3),
             "proposed_stop_loss": round(proposed["stop_loss_pct"], 3),
@@ -670,17 +670,13 @@ class KLConstrainedPolicyAdapter:
             "time": time.strftime("%H:%M:%S"),
         }
         self.update_history.append(update_record)
-        return update_record
         if len(self.update_history) > 50:
             self.update_history.pop(0)
-
-        # Slowly drift base toward current policy (allows long-term evolution)
-        self._drift_base()
 
         return update_record
 
     def adapt_on_win(self, ctx: TradeContext):
-        """Reinforce successful patterns by slightly boosting their confidence."""
+        """Reinforce successful patterns by formulating a hypothesis (advisory only, never applied live)."""
         pattern = ctx.pattern
         # Champion policy is immutable; win reinforcement is advisory only.
         if pattern in self.current_policy["pattern_confidences"]:

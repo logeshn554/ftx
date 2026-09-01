@@ -66,7 +66,9 @@ class PaperTradingSession:
         regime_confidence: float,
         drawdown: float = 0.0,
         consecutive_losses: int = 0,
+        daily_loss: float = 0.0,
         q_p_win: float | None = None,
+        regime_performance: dict[str, dict] | None = None,
     ) -> TradeDecision:
         mapped = self.map_server_indicators(indicators, price)
         return self.engine.decide(
@@ -77,7 +79,9 @@ class PaperTradingSession:
             regime_confidence=regime_confidence,
             drawdown=drawdown,
             consecutive_losses=consecutive_losses,
+            daily_loss=daily_loss,
             p_win=q_p_win,
+            regime_performance=regime_performance,
         )
 
     def open_trade(self, symbol: str, decision: TradeDecision, price: float) -> bool:
@@ -99,6 +103,8 @@ class PaperTradingSession:
             "entry_time": datetime.now(timezone.utc),
             "duration_bars": 0,
         }
+        # Record into anti-churn cooldown tracker
+        self.engine.cooldown.record_entry(notional=notional)
         return True
 
     def check_close(self, price: float, max_bars: int = 6) -> CloseResult | None:
@@ -133,6 +139,8 @@ class PaperTradingSession:
         else:
             reason = "TIME_EXPIRED"
 
+        # Record into anti-churn cooldown tracker
+        self.engine.cooldown.record_close(notional=closed.quantity * closed.exit_price)
         self._open_meta = None
         return CloseResult(
             trade_id=meta["trade_id"],

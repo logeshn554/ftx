@@ -44,22 +44,52 @@ class TargetEngine:
         round_trip = self.cost_model.estimated_round_trip_cost_pct()
         minimum_target = round_trip * self.cost_safety_multiplier
         atr_move = max(0.0, float(atr_pct))
-        proposed_tp = strategy_target_pct if strategy_target_pct is not None else atr_move * self.atr_multiplier_tp
-        proposed_tp = max(proposed_tp, minimum_target)
-        proposed_sl = max(atr_move * self.atr_multiplier_sl, minimum_target / self.min_risk_reward)
-        move = max(expected_move_pct, proposed_tp)
 
-        if move <= minimum_target:
+        # GATE: Check the REAL expected move against cost threshold FIRST.
+        # If the expected move cannot cover costs with the safety margin,
+        # the answer is HOLD — never inflate TP to force viability.
+        if expected_move_pct < minimum_target:
+            # Compute what the TP/SL would have been (for diagnostics)
+            diag_tp = strategy_target_pct if strategy_target_pct is not None else atr_move * self.atr_multiplier_tp
+            diag_sl = atr_move * self.atr_multiplier_sl if atr_move > 0 else minimum_target / self.min_risk_reward
             return TargetPlan(
                 should_trade=False,
-                take_profit_pct=proposed_tp,
-                stop_loss_pct=proposed_sl,
+                take_profit_pct=diag_tp,
+                stop_loss_pct=diag_sl,
                 minimum_target_pct=minimum_target,
                 expected_move_pct=expected_move_pct,
                 round_trip_cost_pct=round_trip,
                 reason="EXPECTED_MOVE_BELOW_COST",
             )
-        if proposed_tp <= minimum_target:
+
+        # Compute TP from strategy target or ATR — NEVER from cost floors.
+        proposed_tp = (
+            strategy_target_pct
+            if strategy_target_pct is not None
+            else atr_move * self.atr_multiplier_tp
+        )
+
+        # If the computed TP is still below cost threshold, the strategy's
+        # target itself is too small — reject, don't inflate.
+        if proposed_tp < minimum_target:
+            return TargetPlan(
+                should_trade=False,
+                take_profit_pct=proposed_tp,
+                stop_loss_pct=atr_move * self.atr_multiplier_sl if atr_move > 0 else minimum_target / self.min_risk_reward,
+                minimum_target_pct=minimum_target,
+                expected_move_pct=expected_move_pct,
+                round_trip_cost_pct=round_trip,
+                reason="TARGET_BELOW_MINIMUM",
+            )
+
+        # SL derived from ATR only — never deflated below a sane minimum.
+        proposed_sl = max(
+            atr_move * self.atr_multiplier_sl,
+            proposed_tp / max(self.min_risk_reward, 1.0),
+        )
+
+        # Final R:R sanity check
+        if proposed_sl > 0 and proposed_tp / proposed_sl < self.min_risk_reward:
             return TargetPlan(
                 should_trade=False,
                 take_profit_pct=proposed_tp,
@@ -67,8 +97,9 @@ class TargetEngine:
                 minimum_target_pct=minimum_target,
                 expected_move_pct=expected_move_pct,
                 round_trip_cost_pct=round_trip,
-                reason="TARGET_BELOW_MINIMUM",
+                reason="RISK_REWARD_INSUFFICIENT",
             )
+
         return TargetPlan(
             should_trade=True,
             take_profit_pct=proposed_tp,
@@ -78,3 +109,4 @@ class TargetEngine:
             round_trip_cost_pct=round_trip,
             reason="ACCEPTED",
         )
+

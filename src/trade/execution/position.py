@@ -4,9 +4,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import Literal
 
 Side = Literal["BUY", "SELL"]
+
+
+class PositionDirection(str, Enum):
+    """Unambiguous position direction.
+
+    LONG  = bought asset, profit when price rises
+    SHORT = sold asset (borrowed), profit when price falls
+    FLAT  = no position
+    """
+
+    LONG = "LONG"
+    SHORT = "SHORT"
+    FLAT = "FLAT"
+
+    @classmethod
+    def from_side(cls, side: Side) -> PositionDirection:
+        """Convert a BUY/SELL order side to position direction."""
+        return cls.LONG if side == "BUY" else cls.SHORT
 
 
 @dataclass

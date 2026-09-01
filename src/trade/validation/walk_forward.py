@@ -1,9 +1,10 @@
-"""Walk-forward validation: rolling train/test evaluation."""
+"""Walk-forward validation: rolling train/validation/test evaluation."""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -35,9 +36,9 @@ class WalkForwardResult:
 class WalkForwardValidator:
     """Performs rolling walk-forward validation.
 
-    Splits data into overlapping train/test windows and evaluates
-    the model on each out-of-sample test window to assess
-    robustness and consistency.
+    Splits data into strictly chronological, non-overlapping train,
+    validation, and test windows. Supports optional per-window retraining
+    via `train_callback` to eliminate lookahead bias and model staleness.
     """
 
     def __init__(
@@ -49,7 +50,7 @@ class WalkForwardValidator:
         commission_pct: float = 0.001,
         slippage_pct: float = 0.0005,
         feature_window: int = 30,
-        validation_window_days: int = 0,
+        validation_window_days: int = 42,
     ) -> None:
         self.train_window_days = train_window_days
         self.test_window_days = test_window_days
@@ -66,14 +67,16 @@ class WalkForwardValidator:
         features_df: pd.DataFrame,
         feature_columns: list[str],
         model_version: ModelVersion | None = None,
+        train_callback: Callable[[pd.DataFrame, pd.DataFrame, list[str]], str] | None = None,
     ) -> WalkForwardResult:
         """Run walk-forward validation across multiple windows.
 
         Args:
-            model_path: Path to the saved model.
+            model_path: Path to the base saved model.
             features_df: Full feature DataFrame.
             feature_columns: Feature column names.
             model_version: Model version descriptor.
+            train_callback: Optional callable (train_df, val_df, feature_cols) -> retrained_model_path.
 
         Returns:
             WalkForwardResult with aggregated out-of-sample metrics.
@@ -115,9 +118,18 @@ class WalkForwardValidator:
                 start += self.step_days
                 continue
 
+            active_model_path = model_path
+            # Per-window retraining if callback provided
+            if train_callback is not None:
+                try:
+                    active_model_path = train_callback(train_df, validation_df, feature_columns)
+                except Exception:
+                    logger.warning("Train callback failed for window %d, falling back to base model", window_id, exc_info=True)
+                    active_model_path = model_path
+
             try:
                 result = backtester.run(
-                    model_path=model_path,
+                    model_path=active_model_path,
                     features_df=test_df,
                     feature_columns=feature_columns,
                     model_version=model_version,
@@ -133,6 +145,7 @@ class WalkForwardValidator:
                     "test_end": test_end,
                     "train_rows": len(train_df),
                     "validation_rows": len(validation_df),
+                    "test_rows": len(test_df),
                     "oos_sharpe": result.sharpe_ratio,
                     "oos_return": result.total_return,
                     "oos_max_drawdown": result.max_drawdown,

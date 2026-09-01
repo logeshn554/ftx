@@ -54,9 +54,12 @@ try:
 except ImportError:
     from scripts.webrl_engine import WebRLEngine, TradeContext  # type: ignore
 
+from trade.experience.schema import TradeExperience
+from trade.evolution.experience_store import ImmutableExperienceStore
 from trade.execution.paper_session import PaperTradingSession
 
 webrl = WebRLEngine()
+experience_store = ImmutableExperienceStore(path=_ROOT_DIR / "data_cache" / "experiences.json")
 
 BASE_DIR = Path(__file__).parent.parent.resolve()
 DASHBOARD_DIR = BASE_DIR / "dashboard"
@@ -427,6 +430,44 @@ def live_trading_lifecycle_worker():
                     entry_indicators = state.open_position.get("entry_indicators") if state.open_position else None
                     webrl_result = webrl.on_loss(trade_ctx, entry_indicators=entry_indicators) if outcome_type == "LOSS" else webrl.on_win(trade_ctx, entry_indicators=entry_indicators)
 
+                    # Persist audit-grade TradeExperience record
+                    try:
+                        import datetime as _dt
+                        numeric_feats = tuple((k, float(v)) for k, v in (entry_indicators or {}).items() if isinstance(v, (int, float)))
+                        experience_store.append(
+                            TradeExperience(
+                                timestamp=_dt.datetime.now(_dt.timezone.utc),
+                                symbol="BTC/USDT",
+                                timeframe="1m",
+                                market_features=numeric_feats,
+                                regime=state.current_regime,
+                                regime_confidence=state.regime_confidence,
+                                strategy=state.open_position.get("pattern", "unknown") if state.open_position else "unknown",
+                                action=side,
+                                signal_confidence=0.75,
+                                expected_value=0.0,
+                                entry_price=entry_p,
+                                exit_price=current_p,
+                                quantity=qty,
+                                gross_pnl=close_result.gross_pnl,
+                                fees=close_result.fees,
+                                slippage=close_result.slippage,
+                                net_pnl=net_pnl_dollars,
+                                return_pct=net_pnl_pct,
+                                maximum_adverse_excursion=0.0,
+                                maximum_favorable_excursion=0.0,
+                                duration=state.open_position.get("duration_bars", 0) if state.open_position else 0,
+                                drawdown_before=state.drawdown,
+                                drawdown_after=state.drawdown,
+                                outcome=outcome_type,
+                                model_version="v1.0.0",
+                                strategy_version="v1.0.0",
+                                feature_version="v1.0.0",
+                            )
+                        )
+                    except Exception as exp_err:
+                        print(f"Failed to record TradeExperience: {exp_err}")
+
                     closed_trade = {
                         "time": time.strftime("%H:%M:%S"),
                         "symbol": "BTC/USDT",
@@ -497,6 +538,9 @@ def live_trading_lifecycle_worker():
                     q_value = float(chosen_eval.get("q_value", 0.0))
                     p_win = min(1.0, max(0.0, 0.5 + q_value * 0.25))
 
+                    regime_perf = experience_store.aggregate_by_strategy_regime()
+                    daily_loss_pct = max(0.0, -state.daily_pnl / max(state.initial_capital, 1.0))
+
                     decision = state.paper.evaluate_entry(
                         indicators=ind,
                         price=price,
@@ -504,14 +548,16 @@ def live_trading_lifecycle_worker():
                         regime_confidence=state.regime_confidence,
                         drawdown=state.drawdown,
                         consecutive_losses=state.consecutive_losses,
+                        daily_loss=daily_loss_pct,
                         q_p_win=p_win,
+                        regime_performance=regime_perf,
                     )
                     state.webrl_eval = {**chosen_eval, "canonical_decision": decision.reason, "expected_value": decision.expected_value}
                     state.last_decision = decision.action if decision.action == "HOLD" else f"{decision.side} ({decision.strategy})"
                     state.detected_pattern = decision.strategy or "No signal"
                     state.risk_guard_status = f"EV={decision.expected_value:.4f} cost={decision.estimated_cost:.3f}% | {decision.reason}"
 
-                    if decision.action == "TRADE" and chosen_eval.get("should_trade", False):
+                    if decision.action == "TRADE":
                         if state.paper.open_trade("BTC/USDT", decision, price):
                             pos = state.paper.ledger.open_position
                             snap = state.paper.snapshot(price)
