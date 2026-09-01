@@ -659,6 +659,11 @@ class UnifiedRequestHandler(http.server.SimpleHTTPRequestHandler):
             self.handle_websocket_handshake()
             return
 
+        if path == "/favicon.ico":
+            self.send_response(204)
+            self.end_headers()
+            return
+
         if path == "/health":
             self.send_json({"status": "ok", "version": "1.0.0", "btc_live_price": state.btc_price})
             return
