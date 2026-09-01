@@ -646,8 +646,9 @@ class KLConstrainedPolicyAdapter:
             old_conf = proposed["pattern_confidences"][pattern]
             proposed["pattern_confidences"][pattern] = max(0.5, old_conf - 0.04 * severity)
 
-        # Always slightly reduce position size on any loss
-        proposed["position_size_pct"] = max(0.15, proposed["position_size_pct"] - 0.01)
+        # Only reduce position size on meaningful losses (severity > 0.3)
+        if severity > 0.3:
+            proposed["position_size_pct"] = max(0.15, proposed["position_size_pct"] - 0.01 * severity)
 
         # Compute KL divergence between proposed and base
         kl = self._compute_kl(proposed)
@@ -801,7 +802,7 @@ class MuZeroMCTSPlanner:
     def __init__(self, lookahead_depth: int = 5, num_simulations: int = 30):
         self.lookahead_depth = lookahead_depth
         self.num_simulations = num_simulations
-        self.value_bias = 0.05
+        self.value_bias = 0.0  # Unbiased initial value prior (Bug 9 fix)
         self.total_tree_searches = 0
         self.pruned_branches_count = 0
         self.last_search_plan: dict = {}
@@ -1173,10 +1174,10 @@ class QLearningSignalTable:
     MOMENTUM_ZONES = ["STRONG_DOWN", "WEAK_DOWN", "NEUTRAL", "WEAK_UP", "STRONG_UP"]
     ACTIONS = ["BUY", "SELL"]
 
-    def __init__(self, alpha: float = 0.15, gamma: float = 0.0, min_trades: int = 3):
+    def __init__(self, alpha: float = 0.15, gamma: float = 0.0, min_trades: int = 5):
         self.alpha = alpha  # Learning rate
         self.gamma = gamma  # Discount factor (0 for immediate reward)
-        self.min_trades = min_trades  # Minimum trades before trusting Q-value
+        self.min_trades = min_trades  # Minimum trades before trusting Q-value (Bug 5/8 fix)
         self.q_table: Dict[str, Dict[str, float]] = {}  # state_key -> {action -> q_value}
         self.visit_count: Dict[str, Dict[str, int]] = {}  # state_key -> {action -> count}
         self.total_updates = 0
@@ -1229,8 +1230,8 @@ class QLearningSignalTable:
         if visits < self.min_trades:
             return True, q_val, f"EXPLORING (visits={visits}/{self.min_trades})"
 
-        # Exploitation: only trade if Q-value is positive (historically profitable)
-        if q_val > -0.05:  # Small tolerance for near-zero Q
+        # Exploitation: strictly non-negative expected value (Bug 5 fix: no negative EV tolerance)
+        if q_val >= 0.0:
             return True, q_val, f"Q_POSITIVE (Q={q_val:+.3f}, visits={visits})"
         else:
             return False, q_val, f"Q_NEGATIVE (Q={q_val:+.3f}, visits={visits})"
@@ -1302,8 +1303,8 @@ class WebRLEngine:
         self.grpo = GRPOEvaluator(group_size=4)
         self.pdrl = PDRLLossMitigator(penalty_lambda=2.2)
 
-        # *** REAL Q-Learning Signal Table ***
-        self.q_table = QLearningSignalTable(alpha=0.15, gamma=0.0, min_trades=3)
+        # *** REAL Q-Learning Signal Table (min_trades=5, Bug 8 fix) ***
+        self.q_table = QLearningSignalTable(alpha=0.15, gamma=0.0, min_trades=5)
 
         self.total_trades = 0
         self.total_losses = 0
@@ -1421,9 +1422,9 @@ class WebRLEngine:
         self.total_trades += 1
         self.total_wins += 1
 
-        # *** Q-TABLE UPDATE: Feed back POSITIVE reward from real trade outcome ***
+        # *** Q-TABLE UPDATE: Feed back POSITIVE reward (symmetric divisor 1.5, Bug 6 fix) ***
         if entry_indicators:
-            reward = min(1.0, ctx.pnl_pct / 1.0)  # Normalize: +1.0% win -> +1.0 reward
+            reward = min(1.0, ctx.pnl_pct / 1.5)  # Normalize: +1.5% win -> +1.0 reward (symmetric with on_loss)
             self.q_table.update(entry_indicators, ctx.side, reward)
 
         self.loss_analyzer.record_win(ctx)
@@ -1515,6 +1516,10 @@ class WebRLEngine:
         # 5. Re-center base policy with updated macro knowledge
         self.policy_adapter.base_policy = json.loads(json.dumps(cur_policy))
 
+        # Compute real empirical win-rate delta vs 50% baseline (Bug 10 fix)
+        empirical_win_delta = max(0.0, recent_win_rate - 50.0)
+        reduction_pct = round(min(100.0, (empirical_win_delta / 50.0) * 100.0), 1) if recent_win_rate >= 50.0 else 0.0
+
         report = {
             "milestone_number": milestone_idx,
             "total_attempts": self.total_trades,
@@ -1528,7 +1533,7 @@ class WebRLEngine:
                 f"Synchronized base policy anchor with 100-attempt loss-minimization weights",
             ],
             "recalibrated_weights": recalibrated_weights,
-            "estimated_loss_reduction": f"{random.randint(18, 34)}%",
+            "estimated_loss_reduction": f"{reduction_pct:.1f}%",
             "timestamp": time.strftime("%H:%M:%S"),
         }
         self.last_milestone_report = report

@@ -312,7 +312,7 @@ def live_trading_lifecycle_worker():
                 state.agent_status = "Circuit Breaker OPEN — Trading Paused"
                 continue
 
-            # 2. Manage Open Position — ATR-based TP/SL
+            # 2. Manage Open Position — ATR-based TP/SL (Gated on Gross Price Move)
             if state.open_position is not None:
                 pos = state.open_position
                 current_p = state.btc_price
@@ -320,35 +320,38 @@ def live_trading_lifecycle_worker():
                 qty = pos["quantity"]
                 side = pos["side"]
 
-                # Gross Price difference
+                # Gross Price difference & percentage (Bug 4 fix: TP/SL evaluates pure price action)
                 price_diff = (current_p - entry_p) if side == "BUY" else (entry_p - current_p)
                 gross_pnl_dollars = round(price_diff * qty, 2)
+                gross_pnl_pct = round((price_diff / max(entry_p, 1.0)) * 100, 2)
                 
-                # 0.1% Trading Fee (reduced from 0.2% to reflect realistic maker fees)
-                fee_dollars = round(pos["allocated_capital"] * 0.001, 2)
-                net_pnl_dollars = round(gross_pnl_dollars - fee_dollars, 2)
+                # Accounting: entry fee was pre-paid at open; exit fee is calculated for close
+                exit_fee_dollars = round(pos["allocated_capital"] * 0.001, 2)
+                total_roundtrip_fee = round(pos.get("entry_fee", 0.0) + exit_fee_dollars, 2)
+                net_pnl_dollars = round(gross_pnl_dollars - total_roundtrip_fee, 2)
                 net_pnl_pct = round((net_pnl_dollars / max(pos["allocated_capital"], 1.0)) * 100, 2)
 
                 pos["current_price"] = current_p
                 pos["gross_pnl"] = gross_pnl_dollars
-                pos["fee"] = fee_dollars
+                pos["gross_pnl_pct"] = gross_pnl_pct
+                pos["fee"] = total_roundtrip_fee
                 pos["pnl"] = net_pnl_dollars
                 pos["pnl_pct"] = net_pnl_pct
                 pos["duration_bars"] = pos.get("duration_bars", 0) + 1
 
-                # ATR-based TP/SL from the position's entry snapshot
-                tp_threshold = pos.get("tp_pct", 1.5)  # Stored at entry
+                # ATR-based TP/SL from entry snapshot (Bug 4 fix: gross_pnl_pct prevents fee-drag false stop-outs)
+                tp_threshold = pos.get("tp_pct", 1.5)
                 sl_threshold = -pos.get("sl_pct", 0.8)
 
-                tp_reached = net_pnl_pct >= tp_threshold
-                sl_reached = net_pnl_pct <= sl_threshold
+                tp_reached = gross_pnl_pct >= tp_threshold
+                sl_reached = gross_pnl_pct <= sl_threshold
                 time_expired = pos["duration_bars"] >= 60  # 60 bars × 3s = 3 minutes hold
 
                 if tp_reached or sl_reached or time_expired:
-                    # Close Position & Realize Net Profit/Loss (after 0.2% fee)
-                    state.cash_balance = round(state.cash_balance + pos["allocated_capital"] + net_pnl_dollars, 2)
+                    # Bug 2 & 3 fix: restore cash + gross PnL - exit fee (entry fee was already deducted at open)
+                    state.cash_balance = round(state.cash_balance + pos["allocated_capital"] + gross_pnl_dollars - exit_fee_dollars, 2)
                     state.daily_pnl = round(state.cash_balance - state.initial_capital, 2)
-                    state.total_fees_paid = round(state.total_fees_paid + fee_dollars, 2)
+                    state.total_fees_paid = round(state.total_fees_paid + exit_fee_dollars, 2)
                     state.total_trades_count += 1
                     if net_pnl_dollars >= 0:
                         state.winning_trades_count += 1
@@ -549,8 +552,10 @@ def live_trading_lifecycle_worker():
                             alloc_pct = chosen_eval["adapted_position_pct"]
                             alloc_capital = round(min(state.cash_balance * alloc_pct, state.cash_balance * 0.25), 2)  # Max 25% per trade
                             if alloc_capital >= 5.0:
+                                entry_fee = round(alloc_capital * 0.001, 2)  # 0.1% entry fee (Bug 1 fix: pre-pay at open)
                                 trade_qty = round(alloc_capital / state.btc_price, 6)
-                                state.cash_balance = round(state.cash_balance - alloc_capital, 2)
+                                state.cash_balance = round(state.cash_balance - alloc_capital - entry_fee, 2)
+                                state.total_fees_paid = round(state.total_fees_paid + entry_fee, 2)
 
                                 state.open_position = {
                                     "symbol": "BTC/USDT",
@@ -559,7 +564,10 @@ def live_trading_lifecycle_worker():
                                     "current_price": state.btc_price,
                                     "quantity": trade_qty,
                                     "allocated_capital": alloc_capital,
-                                    "fee": round(alloc_capital * 0.001, 2),
+                                    "entry_fee": entry_fee,
+                                    "fee": entry_fee,
+                                    "gross_pnl": 0.00,
+                                    "gross_pnl_pct": 0.00,
                                     "pnl": 0.00,
                                     "pnl_pct": 0.00,
                                     "duration_bars": 0,
@@ -577,7 +585,7 @@ def live_trading_lifecycle_worker():
                                 state.events.insert(0, {
                                     "time": time.strftime("%H:%M:%S"),
                                     "level": "info",
-                                    "message": f"EXECUTED {signal_side}: ${alloc_capital:.2f} ({alloc_pct:.0%}) {mode_tag} | Signal: {signal_name} | ATR={atr_pct:.3f}% TP={tp_pct:.2f}% SL={sl_pct:.2f}% | Q={q_value:+.3f}"
+                                    "message": f"EXECUTED {signal_side}: ${alloc_capital:.2f} ({alloc_pct:.0%}) {mode_tag} | Signal: {signal_name} | ATR={atr_pct:.3f}% TP={tp_pct:.2f}% SL={sl_pct:.2f}% | Fee: ${entry_fee:.2f} | Q={q_value:+.3f}"
                                 })
                                 state.current_step = f"3. RL Order: {signal_side} {trade_qty:.5f} BTC @ ${state.btc_price:,.2f} ({mode_tag})"
                     else:
