@@ -152,7 +152,7 @@ def fetch_live_binance_btc():
             "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
             headers={"User-Agent": "Mozilla/5.0"}
         )
-        with urllib.request.urlopen(req, timeout=2.5) as resp:
+        with urllib.request.urlopen(req, timeout=1.2) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             return float(data["price"])
     except Exception:
