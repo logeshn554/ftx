@@ -70,6 +70,8 @@ class RollbackArchive:
         self.archive_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
 
     def _load(self) -> None:
+        if not self.archive_path:
+            return
         try:
             raw = json.loads(self.archive_path.read_text(encoding="utf-8"))
             self._snapshots = [RollbackSnapshot.from_dict(item) for item in raw]
