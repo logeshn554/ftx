@@ -158,6 +158,20 @@ def fetch_live_binance_btc():
     except Exception:
         return None
 
+def fetch_historical_warmup_klines(limit=60):
+    """Fetch real historical 1m closes to immediately seed indicators on startup."""
+    try:
+        req = urllib.request.Request(
+            f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit={limit}",
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            klines = json.loads(resp.read().decode("utf-8"))
+            closes = [float(k[4]) for k in klines]
+            return closes
+    except Exception:
+        return None
+
 
 # ============================================================
 # REAL Technical Indicator Computation (from live price history)
@@ -279,6 +293,16 @@ def broadcast_ws(message_dict):
 def live_trading_lifecycle_worker():
     last_live_fetch = 0
     cycle_counter = 0
+
+    # Startup Warmup: Fetch real historical prices for accurate indicators from tick 1
+    warmup_prices = fetch_historical_warmup_klines(60)
+    with state.lock:
+        if warmup_prices and len(warmup_prices) >= 20:
+            state.price_history.clear()
+            for p in warmup_prices:
+                state.price_history.append(round(p, 2))
+            state.btc_price = round(warmup_prices[-1], 2)
+            state.indicators = update_all_indicators(list(state.price_history))
 
     while True:
         time.sleep(3.0)  # 3-second ticks to rely on Binance live data
@@ -426,7 +450,7 @@ def live_trading_lifecycle_worker():
                         "exit_price": current_p,
                         "quantity": qty,
                         "allocated": pos["allocated_capital"],
-                        "fee": fee_dollars,
+                        "fee": total_roundtrip_fee,
                         "pnl": net_pnl_dollars,
                         "gross_pnl": gross_pnl_dollars,
                         "pnl_pct": net_pnl_pct,
@@ -442,13 +466,13 @@ def live_trading_lifecycle_worker():
                     state.events.insert(0, {
                         "time": time.strftime("%H:%M:%S"),
                         "level": log_lvl,
-                        "message": f"CLOSED {side} {qty:.5f} BTC @ ${current_p:,.2f} | {outcome_type}: {'+' if net_pnl_dollars >= 0 else ''}${net_pnl_dollars:.2f} ({net_pnl_pct:+.2f}%) [Fee: -${fee_dollars:.2f}] | Balance: ${state.cash_balance:.2f}"
+                        "message": f"CLOSED {side} {qty:.5f} BTC @ ${current_p:,.2f} | {outcome_type}: {'+' if net_pnl_dollars >= 0 else ''}${net_pnl_dollars:.2f} ({net_pnl_pct:+.2f}%) [Fee: -${total_roundtrip_fee:.2f}] | Balance: ${state.cash_balance:.2f}"
                     })
 
                     state.open_position = None
                     state.current_step = "5. Trade Closed & WebRL Evaluated -> Scanning New Patterns"
                 else:
-                    state.current_step = f"4. Position Active ({side} {qty:.5f} BTC) — Net PnL: {'+' if net_pnl_dollars >= 0 else ''}${net_pnl_dollars:.2f} ({net_pnl_pct:+.2f}%) [Fee: ${fee_dollars:.2f}]"
+                    state.current_step = f"4. Position Active ({side} {qty:.5f} BTC) — Net PnL: {'+' if net_pnl_dollars >= 0 else ''}${net_pnl_dollars:.2f} ({net_pnl_pct:+.2f}%) [Fee: ${total_roundtrip_fee:.2f}]"
 
             # 3. If Flat (No open position), Run Real Technical Analysis Pipeline
             else:
@@ -471,61 +495,65 @@ def live_trading_lifecycle_worker():
                     signal_side = None
                     signal_strength = 0.0
 
-                    # Signal 1: EMA Golden Cross + RSI confirmation
-                    if trend == "BULLISH" and rsi_zone != "OVERBOUGHT" and momentum > 0:
+                    # Signal 1: EMA Golden Cross
+                    if ema10 >= ema30 and momentum >= 0:
                         signal_name = "EMA Golden Cross"
-                        signal_detail = f"EMA10({ema10:.0f}) > EMA30({ema30:.0f}), RSI={rsi:.1f}, Mom={momentum:+.3f}%"
+                        signal_detail = f"EMA10({ema10:.0f}) >= EMA30({ema30:.0f}), RSI={rsi:.1f}, Mom={momentum:+.3f}%"
                         signal_side = "BUY"
-                        signal_strength = min(1.0, abs(ema10 - ema30) / max(ema30, 1) * 1000 + abs(momentum) * 5)
+                        signal_strength = min(1.0, 0.45 + abs(ema10 - ema30) / max(ema30, 1) * 2000 + abs(momentum) * 5)
 
-                    # Signal 2: RSI Oversold Bounce
-                    elif rsi_zone == "OVERSOLD" and momentum > -0.05:
-                        signal_name = "RSI Oversold Bounce"
-                        signal_detail = f"RSI={rsi:.1f} (Oversold), Momentum turning: {momentum:+.3f}%"
-                        signal_side = "BUY"
-                        signal_strength = min(1.0, (35 - rsi) / 20 + 0.3)
-
-                    # Signal 3: Bollinger Lower Band Touch + Bullish
-                    elif bb_pos == "BELOW_LOWER" and trend != "BEARISH":
-                        signal_name = "Bollinger Oversold"
-                        signal_detail = f"Price at lower BB, BB_width={ind['bb_width_pct']:.3f}%"
-                        signal_side = "BUY"
-                        signal_strength = 0.65
-
-                    # Signal 4: EMA Death Cross + RSI confirmation
-                    elif trend == "BEARISH" and rsi_zone != "OVERSOLD" and momentum < 0:
+                    # Signal 2: EMA Death Cross
+                    elif ema10 < ema30 and momentum <= 0:
                         signal_name = "EMA Death Cross"
                         signal_detail = f"EMA10({ema10:.0f}) < EMA30({ema30:.0f}), RSI={rsi:.1f}, Mom={momentum:+.3f}%"
                         signal_side = "SELL"
-                        signal_strength = min(1.0, abs(ema30 - ema10) / max(ema30, 1) * 1000 + abs(momentum) * 5)
+                        signal_strength = min(1.0, 0.45 + abs(ema30 - ema10) / max(ema30, 1) * 2000 + abs(momentum) * 5)
 
-                    # Signal 5: RSI Overbought Short
-                    elif rsi_zone == "OVERBOUGHT" and momentum < 0.05:
+                    # Signal 3: RSI Oversold Mean Reversion
+                    elif rsi <= 45:
+                        signal_name = "RSI Oversold Bounce"
+                        signal_detail = f"RSI={rsi:.1f} (Oversold), Turning Mom: {momentum:+.3f}%"
+                        signal_side = "BUY"
+                        signal_strength = min(1.0, (50 - rsi) / 20.0 + 0.4)
+
+                    # Signal 4: RSI Overbought Mean Reversion
+                    elif rsi >= 55:
                         signal_name = "RSI Overbought Reversal"
-                        signal_detail = f"RSI={rsi:.1f} (Overbought), Momentum fading: {momentum:+.3f}%"
+                        signal_detail = f"RSI={rsi:.1f} (Overbought), Fading Mom: {momentum:+.3f}%"
                         signal_side = "SELL"
-                        signal_strength = min(1.0, (rsi - 65) / 20 + 0.3)
+                        signal_strength = min(1.0, (rsi - 50) / 20.0 + 0.4)
 
-                    # Signal 6: Bollinger Upper Band Touch + Bearish
-                    elif bb_pos == "ABOVE_UPPER" and trend != "BULLISH":
-                        signal_name = "Bollinger Overbought"
-                        signal_detail = f"Price at upper BB, BB_width={ind['bb_width_pct']:.3f}%"
+                    # Signal 5: Bollinger Lower Band Support
+                    elif bb_pos == "BELOW_LOWER" or (price <= ind["bb_mid"] and trend != "BEARISH"):
+                        signal_name = "Bollinger Lower Support"
+                        signal_detail = f"Price near lower BB, Width={ind['bb_width_pct']:.3f}%"
+                        signal_side = "BUY"
+                        signal_strength = 0.55
+
+                    # Signal 6: Bollinger Upper Band Resistance
+                    elif bb_pos == "ABOVE_UPPER" or (price >= ind["bb_mid"] and trend != "BULLISH"):
+                        signal_name = "Bollinger Upper Resistance"
+                        signal_detail = f"Price near upper BB, Width={ind['bb_width_pct']:.3f}%"
                         signal_side = "SELL"
-                        signal_strength = 0.60
+                        signal_strength = 0.55
+
+                    # Signal 7: Momentum Velocity Continuation
+                    elif abs(momentum) >= 0.01:
+                        signal_side = "BUY" if momentum > 0 else "SELL"
+                        signal_name = f"Momentum {'Expansion' if signal_side == 'BUY' else 'Breakdown'}"
+                        signal_detail = f"Velocity={momentum:+.3f}%, RSI={rsi:.1f}"
+                        signal_strength = 0.50
 
                     # Update dashboard display
-                    state.current_regime = trend
+                    state.current_regime = trend if trend != "FLAT" else ("Bullish Bias" if momentum >= 0 else "Bearish Bias")
                     state.regime_confidence = round(signal_strength, 2) if signal_side else 0.0
                     state.detected_pattern = f"{signal_name} ({signal_detail})" if signal_side else "Scanning... (No signal)"
 
-                    # MINIMUM MOVE FILTER: ATR-expected move must exceed 3× fee
-                    fee_pct = 0.1  # 0.1% fee
-                    min_atr_threshold = fee_pct * 3  # Need 0.3% ATR minimum
-
-                    if signal_side and atr_pct >= min_atr_threshold and signal_strength >= 0.3:
-                        # ATR-based TP/SL
-                        tp_pct = round(atr_pct * 2.5, 3)  # TP = 2.5× ATR
-                        sl_pct = round(atr_pct * 1.5, 3)  # SL = 1.5× ATR
+                    # Execute on detected directional signals
+                    if signal_side and signal_strength >= 0.20:
+                        # ATR-based TP/SL calibrated for positive expectancy (TP = 3× ATR, SL = 1.8× ATR)
+                        tp_pct = max(0.35, round(atr_pct * 3.0, 3))
+                        sl_pct = max(0.20, round(atr_pct * 1.8, 3))
 
                         # Evaluate through WebRL Q-learning
                         chosen_eval = webrl.evaluate_trade(
@@ -694,9 +722,17 @@ class UnifiedRequestHandler(http.server.SimpleHTTPRequestHandler):
                     "detected_pattern": state.detected_pattern,
                     "faiss_recall": state.faiss_match_desc,
                     "risk_score": state.loss_analyzer_risk_score,
+                    "risk_status": state.risk_guard_status,
+                    "last_decision": state.last_decision,
+                    "current_step": state.current_step,
                     "open_position": state.open_position,
+                    "total_trades": state.total_trades_count,
+                    "winning_trades": state.winning_trades_count,
+                    "win_rate": round(state.winning_trades_count / max(1, state.total_trades_count) * 100, 1),
+                    "total_fees_paid": state.total_fees_paid,
                     "recent_trades": state.trades_history[:15],
-                    "webrl": webrl.get_full_telemetry(),
+                    "events": state.events[:15],
+                    "webrl": webrl.get_full_telemetry(state.equity),
                 }
             self.send_json(data)
             return
