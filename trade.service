@@ -1,0 +1,32 @@
+[Unit]
+Description=Self-Evolving Trading System
+Documentation=https://github.com/example/trading-system
+After=network.target
+
+[Service]
+Type=simple
+User=trader
+Group=trader
+WorkingDirectory=/opt/ftx
+
+ExecStart=/opt/ftx/.venv/bin/python scripts/trade.py --config config/production.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trading-system
+
+# Resource limits
+MemoryLimit=2G
+CPUQuota=80%
+
+# Security
+PrivateTmp=yes
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

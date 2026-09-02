@@ -37,6 +37,11 @@ dependencies = [
     "pydantic>=2.8",
     "pydantic-settings>=2.4",
     "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+
+    # Secrets
+    "python-binance>=18.0",
+    "requests>=2.31",
 
     # Logging
     "structlog>=24.4",

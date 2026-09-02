@@ -8,8 +8,10 @@ The risk engine has HIGHER AUTHORITY than the AI.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 from collections import deque
+from pathlib import Path
 from typing import Any
 
 from trade.core.events import RiskBreached, event_bus
@@ -41,15 +43,23 @@ class RiskEngine:
         7. Order value cap?
     """
 
-    def __init__(self, limits: RiskLimits | None = None) -> None:
+    def __init__(self, limits: RiskLimits | None = None, audit_log_path: str = "logs/risk_audit.jsonl") -> None:
         self.limits = limits or RiskLimits()
         self._trading_enabled = True
-        self._daily_start_equity: float = 0.0
+        # FIX 5: Initialize to None so we can detect if reset_daily() was never called
+        self._daily_start_equity: float | None = None
         self._daily_pnl: float = 0.0
+        # FIX 6: Add weekly tracking
+        self._weekly_start_equity: float | None = None
+        self._weekly_pnl: float = 0.0
+        self._peak_equity: float = 100_000.0
         self._order_timestamps: deque[dt.datetime] = deque(maxlen=1000)
         self._daily_order_count: int = 0
         self._consecutive_losses: int = 0
         self._last_data_timestamp: dt.datetime | None = None
+        # FIX 7: Persistent audit log
+        self._audit_log_path = Path(audit_log_path)
+        self._audit_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._audit_log: list[dict[str, Any]] = []
 
     def evaluate(
@@ -94,7 +104,14 @@ class RiskEngine:
                 )
 
         # --- Check 3: Daily loss limit ---
-        if self._daily_start_equity > 0:
+        # FIX 5: Use None to detect if reset_daily() was never called
+        if self._daily_start_equity is None:
+            logger.error(
+                "RISK ENGINE: reset_daily() was never called — daily loss tracking is DISABLED. "
+                "Call reset_daily(starting_equity) before the first order."
+            )
+            rejections.append("DAILY_RESET_MISSING: reset_daily() must be called before trading")
+        elif self._daily_start_equity > 0:
             daily_loss_pct = abs(min(0, self._daily_pnl)) / self._daily_start_equity * 100
             if daily_loss_pct >= self.limits.max_daily_loss_pct:
                 rejections.append(
@@ -161,6 +178,33 @@ class RiskEngine:
                 f"(max order value ${self.limits.max_order_value:,.0f})"
             )
 
+        # FIX 6: Check weekly loss limit
+        if self._weekly_start_equity and self._weekly_start_equity > 0:
+            weekly_loss_pct = abs(min(0, self._weekly_pnl)) / self._weekly_start_equity * 100
+            if weekly_loss_pct >= self.limits.max_weekly_loss_pct:
+                rejections.append(
+                    f"WEEKLY_LOSS_LIMIT: Weekly loss {weekly_loss_pct:.2f}% "
+                    f"exceeds limit {self.limits.max_weekly_loss_pct:.2f}%"
+                )
+
+        # FIX 6: Check total drawdown
+        if portfolio.total_equity > 0 and self._peak_equity > 0:
+            total_drawdown_pct = (self._peak_equity - portfolio.total_equity) / self._peak_equity * 100
+            if total_drawdown_pct >= self.limits.max_total_drawdown_pct:
+                rejections.append(
+                    f"TOTAL_DRAWDOWN: {total_drawdown_pct:.2f}% "
+                    f"exceeds limit {self.limits.max_total_drawdown_pct:.2f}%"
+                )
+
+        # FIX 6: Check order as % of equity
+        order_pct = (adjusted_value / portfolio.total_equity * 100) if portfolio.total_equity > 0 else 0
+        if order_pct > self.limits.max_order_pct:
+            old_qty = modified_order.quantity
+            modified_order.quantity = (portfolio.total_equity * self.limits.max_order_pct / 100) / current_price
+            warnings.append(
+                f"ORDER_PCT_CAPPED: {order_pct:.1f}% → {self.limits.max_order_pct}% of equity"
+            )
+
         # --- Build decision ---
         approved = len(rejections) == 0
         was_modified = modified_order.quantity != order.quantity
@@ -202,7 +246,19 @@ class RiskEngine:
         self._daily_start_equity = starting_equity
         self._daily_pnl = 0.0
         self._daily_order_count = 0
+        self._order_timestamps.clear()
         logger.info("Daily risk counters reset. Starting equity: $%.2f", starting_equity)
+
+    def reset_weekly(self, starting_equity: float) -> None:
+        """Reset weekly tracking on Monday morning."""
+        self._weekly_start_equity = starting_equity
+        self._weekly_pnl = 0.0
+        logger.info("Weekly risk counters reset. Starting equity: $%.2f", starting_equity)
+
+    def update_peak_equity(self, current_equity: float) -> None:
+        """Update the peak equity for drawdown tracking."""
+        if current_equity > self._peak_equity:
+            self._peak_equity = current_equity
 
     def record_trade_result(self, pnl: float) -> None:
         """Record a trade result for consecutive loss tracking."""
@@ -236,7 +292,7 @@ class RiskEngine:
         return self._audit_log.copy()
 
     def _log_decision(self, decision: RiskDecision, price: float) -> None:
-        """Log a risk decision to the audit trail."""
+        """Log a risk decision to the audit trail (in-memory and disk)."""
         entry = {
             "timestamp": dt.datetime.utcnow().isoformat(),
             "symbol": decision.original_order.symbol,
@@ -256,6 +312,13 @@ class RiskEngine:
             entry["warnings"] = decision.warnings
 
         self._audit_log.append(entry)
+
+        # FIX 7: Persist to disk (JSONL format, one JSON object per line)
+        try:
+            with open(self._audit_log_path, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception as e:
+            logger.error("Failed to persist audit log: %s", e)
 
         if not decision.approved:
             logger.warning(

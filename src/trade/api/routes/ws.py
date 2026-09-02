@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+
+from trade.core.secrets import get_ws_token
 
 logger = logging.getLogger(__name__)
 
@@ -17,8 +20,23 @@ _clients: set[WebSocket] = set()
 
 
 @router.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket for streaming live trading updates."""
+async def websocket_endpoint(websocket: WebSocket, token: str = Query("")):
+    """WebSocket for streaming live trading updates.
+
+    Args:
+        token: WebSocket authentication token (via query parameter).
+               Must match TRADE_WS_TOKEN environment variable if configured.
+
+    Example:
+        ws://localhost:8000/ws?token=YOUR_TOKEN
+    """
+    # FIX 20: Authenticate WebSocket connection
+    ws_token = get_ws_token()
+    if ws_token and not secrets.compare_digest(token, ws_token):
+        logger.warning("WebSocket connection rejected: invalid token")
+        await websocket.close(code=1008, reason="Unauthorized")
+        return
+
     await websocket.accept()
     _clients.add(websocket)
     logger.info("WebSocket client connected (%d total)", len(_clients))
@@ -32,6 +50,9 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         _clients.discard(websocket)
         logger.info("WebSocket client disconnected (%d remaining)", len(_clients))
+    except Exception as e:
+        logger.error("WebSocket error: %s", e)
+        _clients.discard(websocket)
 
 
 async def broadcast(event_type: str, data: dict) -> None:

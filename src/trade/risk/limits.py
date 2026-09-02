@@ -59,6 +59,12 @@ class RiskLimits:
     consecutive_loss_limit: int = 5
     """Trip circuit breaker after N consecutive losing trades."""
 
+    def __post_init__(self) -> None:
+        """FIX 27: Validate limits at construction time."""
+        errors = self.validate()
+        if errors:
+            raise ValueError(f"Invalid risk limits:\n" + "\n".join(errors))
+
     def validate(self) -> list[str]:
         """Validate that limits are internally consistent.
 
@@ -72,10 +78,18 @@ class RiskLimits:
         if self.max_daily_loss_pct <= 0:
             errors.append(f"max_daily_loss_pct must be > 0, got {self.max_daily_loss_pct}")
         if self.max_leverage < 1.0:
-            errors.append(f"max_leverage must be >= 1.0, got {self.max_leverage}")
+            errors.append(
+                f"max_leverage must be >= 1.0 (1.0 = no leverage), got {self.max_leverage}"
+            )
         if self.max_order_value <= 0:
             errors.append(f"max_order_value must be > 0, got {self.max_order_value}")
+        if self.max_order_pct <= 0 or self.max_order_pct > 100:
+            errors.append(f"max_order_pct must be in (0, 100], got {self.max_order_pct}")
         if self.max_orders_per_minute <= 0:
             errors.append(f"max_orders_per_minute must be > 0, got {self.max_orders_per_minute}")
+        if self.max_orders_per_day <= 0:
+            errors.append(f"max_orders_per_day must be > 0, got {self.max_orders_per_day}")
+        if self.consecutive_loss_limit <= 0:
+            errors.append(f"consecutive_loss_limit must be > 0, got {self.consecutive_loss_limit}")
 
         return errors

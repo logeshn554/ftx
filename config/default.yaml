@@ -14,10 +14,9 @@ base_dir: "."
 data:
   symbols:
     - AAPL
-    - MSFT
-    - GOOGL
-    - AMZN
-    - TSLA
+    # FIX 14: System currently supports single-symbol trading only.
+    # The ledger and risk engine enforce max 1 open position at a time.
+    # To trade multiple symbols, refactor Ledger to support per-symbol position dicts.
   timeframe: "1d"           # 1m, 5m, 15m, 1h, 1d
   lookback_days: 730        # 2 years of historical data
   feature_window: 30        # bars in each observation window
@@ -86,6 +85,13 @@ learning:
   retrain_cooldown_hours: 24
   max_experience_age_days: 180
   scheduled_retrain_days: 30
+
+# -- Decision Engine (Intelligence) -------------------------------------------
+# FIX 18: Move magic thresholds from scripts to config
+intelligence:
+  min_action_confidence: 0.25     # Only execute if |action| > this (PPO action magnitude)
+  max_loss_risk: 0.35             # Only execute if loss probability < this (XGBoost model)
+  min_ev_threshold: 0.0           # Minimum positive expected value to take trade
 
 # -- API Server ----------------------------------------------------------------
 api:

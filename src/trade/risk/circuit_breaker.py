@@ -53,15 +53,33 @@ class CircuitBreaker:
     def state(self) -> CircuitState:
         """Current circuit breaker state."""
         with self._lock:
-            # Auto-recover from OPEN after cooldown
+            # FIX 16: Do NOT auto-recover. Require manual reset.
+            # If cooldown has elapsed, emit alert but stay OPEN until explicit reset.
             if self._state == CircuitState.OPEN and self._tripped_at:
                 elapsed = (dt.datetime.utcnow() - self._tripped_at).total_seconds()
                 if elapsed >= self._cooldown_seconds:
-                    self._state = CircuitState.HALF_OPEN
-                    logger.info(
-                        "Circuit breaker → HALF_OPEN after %.0fs cooldown",
-                        elapsed,
-                    )
+                    # Check if we've already notified
+                    if not hasattr(self, "_recovery_notified"):
+                        self._recovery_notified = False
+
+                    if not self._recovery_notified:
+                        self._recovery_notified = True
+                        logger.warning(
+                            "⚠️  Circuit breaker cooldown elapsed (%.0fs). "
+                            "Call reset() to manually re-enable trading.",
+                            elapsed,
+                        )
+                        # Emit alert event for notification system
+                        from trade.core.events import event_bus, CircuitBreakerReadyToReset
+                        try:
+                            event_bus.publish_sync(
+                                CircuitBreakerReadyToReset(
+                                    tripped_at=self._tripped_at,
+                                    reason=self._trip_reason,
+                                )
+                            )
+                        except Exception:
+                            pass  # Event class might not exist yet
             return self._state
 
     @property

@@ -22,6 +22,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
 from trade.data.contract import observation_columns
+from trade.core.config import AppConfig  # FIX 18: Load config for thresholds
 
 logger = logging.getLogger("real_engine")
 
@@ -32,7 +33,24 @@ DATA_DIR = EXTRACTED_DIR / "data" / "processed"
 MEMORY_DIR = EXTRACTED_DIR / "memory"
 
 class RealInferenceEngine:
-    def __init__(self):
+    def __init__(self, config_path: str | None = None):
+        # FIX 18: Load configuration for decision thresholds
+        if config_path is None:
+            config_path = str(BASE_DIR / "config" / "default.yaml")
+        
+        self.config = AppConfig.from_yaml(config_path)
+        self.min_action_confidence = self.config.intelligence.min_action_confidence
+        self.max_loss_risk = self.config.intelligence.max_loss_risk
+        self.min_ev_threshold = self.config.intelligence.min_ev_threshold
+        
+        logger.info(
+            "RealInferenceEngine thresholds: "
+            "min_action_confidence=%.2f, max_loss_risk=%.2f, min_ev=%.3f",
+            self.min_action_confidence,
+            self.max_loss_risk,
+            self.min_ev_threshold,
+        )
+        
         self.system_config: Dict[str, Any] = {}
         self.rl_features: list[str] = []
         self.feature_scaler = None
@@ -212,11 +230,12 @@ class RealInferenceEngine:
                 logger.warning("XGBoost loss model inference failure: %s", e)
 
         # Trade decision logic
+        # FIX 18: Use config thresholds instead of magic numbers
         trade_occurred = False
         side = "HOLD"
         quantity = 0.0
 
-        if abs(action_val) > 0.25 and loss_risk < 0.35:
+        if abs(action_val) > self.min_action_confidence and loss_risk < self.max_loss_risk:
             trade_occurred = True
             side = "BUY" if action_val > 0 else "SELL"
             quantity = round(float(abs(action_val) * 0.8), 2)

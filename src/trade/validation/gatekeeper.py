@@ -36,12 +36,12 @@ class Gatekeeper:
         registry: ModelRegistry,
         backtester: Backtester,
         comparator: ModelComparator,
-        walk_forward: WalkForwardValidator | None = None,
+        walk_forward: WalkForwardValidator,  # FIX 8: Make required (remove | None)
     ) -> None:
         self.registry = registry
         self.backtester = backtester
         self.comparator = comparator
-        self.walk_forward = walk_forward
+        self.walk_forward = walk_forward  # Now guaranteed non-None
 
     def evaluate_candidate(
         self,
@@ -79,7 +79,7 @@ class Gatekeeper:
         )
 
         # Step 1: Backtest candidate
-        logger.info("Step 1/3: Backtesting candidate %s...", candidate_version.tag)
+        logger.info("Step 1/4: Backtesting candidate %s...", candidate_version.tag)
         candidate_result = self.backtester.run(
             model_path=candidate_path,
             features_df=features_df,
@@ -87,8 +87,31 @@ class Gatekeeper:
             model_version=candidate_version,
         )
 
-        # Step 2: Backtest champion (for fair comparison on same data)
-        logger.info("Step 2/3: Backtesting champion %s...", champion_version.tag)
+        # Step 2: Walk-forward validation (overfitting check) — FIX 8: Make mandatory
+        logger.info("Step 2/4: Walk-forward validation on candidate %s...", candidate_version.tag)
+        wf_result = self.walk_forward.validate(
+            model_path=candidate_path,
+            features_df=features_df,
+            feature_columns=feature_columns,
+        )
+
+        if not wf_result.passed:
+            logger.info("❌ Candidate %s failed walk-forward validation", candidate_version.tag)
+            self.registry.reject(
+                candidate_version.tag,
+                reason=f"Walk-forward failed: {wf_result.reason}",
+            )
+            # Return early with failure verdict
+            from trade.core.types import ComparisonResult
+            return ComparisonResult(
+                champion_version=champion_version,
+                challenger_version=candidate_version,
+                verdict=ComparisonResult.Verdict.REJECT,
+                notes=f"Walk-forward validation failed: {wf_result.reason}",
+            )
+
+        # Step 3: Backtest champion (for fair comparison on same data)
+        logger.info("Step 3/4: Backtesting champion %s...", champion_version.tag)
         champion_result = self.backtester.run(
             model_path=champion_path,
             features_df=features_df,
@@ -96,8 +119,8 @@ class Gatekeeper:
             model_version=champion_version,
         )
 
-        # Step 3: Compare
-        logger.info("Step 3/3: Comparing models...")
+        # Step 4: Compare
+        logger.info("Step 4/4: Comparing models...")
         comparison = self.comparator.compare(
             champion_result=champion_result,
             challenger_result=candidate_result,

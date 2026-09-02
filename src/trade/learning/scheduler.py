@@ -10,6 +10,7 @@ from trade.core.config import AppConfig
 from trade.core.events import PerformanceDegraded, event_bus
 from trade.core.types import ModelVersion
 from trade.learning.retrainer import CandidateRetrainer
+from trade.model_management.registry import ModelRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +27,15 @@ class RetrainingScheduler:
         - Enforces cooldown between retrainings
     """
 
-    def __init__(self, config: AppConfig, retrainer: CandidateRetrainer) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        retrainer: CandidateRetrainer,
+        registry: ModelRegistry,  # FIX 13: Inject registry to get real version
+    ) -> None:
         self.config = config
         self.retrainer = retrainer
+        self.registry = registry
         self._last_scheduled_retrain: dt.datetime | None = None
         self._event_subscribed = False
         self._lock = threading.Lock()
@@ -40,7 +47,7 @@ class RetrainingScheduler:
             self._event_subscribed = True
             logger.info("RetrainingScheduler subscribed to PerformanceDegraded events")
 
-    def check_scheduled(self, current_version: ModelVersion) -> bool:
+    def check_scheduled(self) -> bool:
         """Check if a scheduled retraining is due.
 
         Returns:
@@ -61,7 +68,7 @@ class RetrainingScheduler:
                 days_since,
                 interval_days,
             )
-            return self._trigger_retrain(current_version, "scheduled")
+            return self._trigger_retrain("scheduled")
 
         return False
 
@@ -73,18 +80,25 @@ class RetrainingScheduler:
             event.current_value,
             event.threshold,
         )
-        # Note: We need the current version from the model registry.
-        # For now, create a placeholder version — in production this would
-        # come from the ModelRegistry.
-        current_version = ModelVersion(major=0, minor=1, patch=0)
-        self._trigger_retrain(current_version, f"degraded_{event.metric_name}")
+        # FIX 13: Get actual production version from registry
+        self._trigger_retrain(f"degraded_{event.metric_name}")
 
-    def _trigger_retrain(self, current_version: ModelVersion, trigger: str) -> bool:
+    def _trigger_retrain(self, trigger: str) -> bool:
         """Attempt to trigger retraining (thread-safe).
 
         Returns:
             True if retraining was started.
         """
+        # FIX 13: Get production version from registry
+        current_version = self.registry.get_production_version()
+        if current_version is None:
+            logger.error(
+                "No production model found in registry — cannot trigger retraining"
+            )
+            return False
+
+        logger.info("Triggering retraining: trigger=%s, current_version=%s", trigger, current_version.tag)
+
         with self._lock:
             if self.retrainer.is_training:
                 logger.info("Retraining already in progress, skipping trigger '%s'", trigger)
