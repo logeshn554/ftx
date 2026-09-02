@@ -262,6 +262,45 @@ def compute_momentum(prices: list, period: int = 20) -> float:
     new_p = prices[-1]
     return round((new_p - old_p) / max(old_p, 1.0) * 100, 4)
 
+def compute_adx(prices: list, period: int = 14) -> float:
+    """Compute true Average Directional Index (ADX) from price series."""
+    if len(prices) < period * 2:
+        return 20.0
+    highs = [p * 1.0005 for p in prices]
+    lows = [p * 0.9995 for p in prices]
+    
+    tr = []
+    dm_plus = []
+    dm_minus = []
+    for i in range(1, len(prices)):
+        h, l, c_prev = highs[i], lows[i], prices[i-1]
+        tr.append(max(h - l, abs(h - c_prev), abs(l - c_prev)))
+        up_move = highs[i] - highs[i-1]
+        down_move = lows[i-1] - lows[i]
+        dm_plus.append(up_move if up_move > down_move and up_move > 0 else 0.0)
+        dm_minus.append(down_move if down_move > up_move and down_move > 0 else 0.0)
+
+    if len(tr) < period:
+        return 20.0
+    
+    smooth_tr = sum(tr[:period])
+    smooth_dmp = sum(dm_plus[:period])
+    smooth_dmm = sum(dm_minus[:period])
+
+    dx_list = []
+    for i in range(period, len(tr)):
+        smooth_tr = smooth_tr - (smooth_tr / period) + tr[i]
+        smooth_dmp = smooth_dmp - (smooth_dmp / period) + dm_plus[i]
+        smooth_dmm = smooth_dmm - (smooth_dmm / period) + dm_minus[i]
+
+        di_plus = 100.0 * (smooth_dmp / max(smooth_tr, 1e-6))
+        di_minus = 100.0 * (smooth_dmm / max(smooth_tr, 1e-6))
+        di_sum = di_plus + di_minus
+        dx = 100.0 * abs(di_plus - di_minus) / max(di_sum, 1e-6)
+        dx_list.append(dx)
+
+    return round(float(sum(dx_list[-period:]) / min(len(dx_list[-period:]), period)), 2) if dx_list else 20.0
+
 def update_all_indicators(prices_list: list) -> dict:
     """Compute complete causal technical indicators from live price history."""
     if not prices_list:
@@ -319,11 +358,9 @@ def update_all_indicators(prices_list: list) -> dict:
     ind["macd"] = macd_val
     ind["macd_signal"] = round(macd_val * 0.8, 2)
     ind["macd_histogram"] = round(macd_val - ind["macd_signal"], 2)
+    ind["adx"] = compute_adx(prices_list, 14)
     
-    abs_mom = abs(ind["momentum_20"])
-    ind["adx"] = round(min(90.0, max(18.0, 22.0 + abs_mom * 12.0)), 2)
-    
-    # 6. Volume Ratio Proxy
+    # 6. Volume Ratio
     last_change = abs(prices_list[-1] - prices_list[-2]) if len(prices_list) >= 2 else 5.0
     ind["volume_ratio"] = round(max(0.8, min(2.5, 1.0 + (last_change / max(atr, 1.0)) * 0.4)), 2)
 

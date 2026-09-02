@@ -125,9 +125,19 @@ class RealInferenceEngine:
         if not self.is_ready or self.df is None or self.total_rows == 0:
             return {}
 
+        if self.current_idx >= self.total_rows:
+            return {
+                "status": "STREAM_COMPLETED",
+                "timestamp": time.strftime("%H:%M:%S"),
+                "price": float(self.df.iloc[-1].get("close", 0.0)) if self.df is not None and len(self.df) > 0 else 0.0,
+                "action_value": 0.0,
+                "side": "HOLD",
+                "trade_occurred": False,
+            }
+
         # Get current row
         row = self.df.iloc[self.current_idx]
-        self.current_idx = (self.current_idx + 1) % self.total_rows
+        self.current_idx += 1
 
         price = float(row.get("close", row.get("close_1m", 64000.0)))
         timestamp_str = str(row.get("timestamp", time.strftime("%H:%M:%S")))
@@ -152,8 +162,8 @@ class RealInferenceEngine:
             obs_scaled = obs_array
 
         # 1. Real HMM Regime Inference
-        regime_name = "Bullish Trend"
-        regime_conf = 0.85
+        regime_name = "UNKNOWN"
+        regime_conf = 0.50
         if self.hmm_model is not None and hasattr(self.hmm_model, "predict"):
             try:
                 hmm_feats = obs_array[:, :4] if obs_array.shape[1] >= 4 else obs_array
@@ -165,10 +175,10 @@ class RealInferenceEngine:
                 if hasattr(self.hmm_model, "predict_proba"):
                     probs = self.hmm_model.predict_proba(hmm_feats)[0]
                     regime_conf = float(probs[state_id])
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("HMM inference failure: %s", e)
 
-        # 2. Real PPO Policy Inference
+        # 2. Real PPO Policy Inference (No heuristic fallbacks)
         action_val = 0.0
         if self.ppo_model is not None:
             try:
@@ -184,10 +194,10 @@ class RealInferenceEngine:
                 self.episode_starts = np.zeros((1,), dtype=bool)
                 action_val = float(np.clip(action[0], -1.0, 1.0))
             except Exception as e:
-                # Fallback to feature momentum if SB3 LSTM state shapes differ
-                action_val = float(np.tanh(obs_scaled[0, 0] * 5.0))
+                logger.warning("PPO inference failure, defaulting to HOLD (0.0): %s", e)
+                action_val = 0.0
         else:
-            action_val = 0.5 if regime_name == "Bullish Trend" else (-0.5 if regime_name == "Bearish Trend" else 0.0)
+            action_val = 0.0
 
         # 3. Real XGBoost Loss / Stopout Probability
         loss_risk = 0.12
@@ -198,8 +208,8 @@ class RealInferenceEngine:
                     loss_risk = float(proba[1]) if len(proba) > 1 else float(proba[0])
                 else:
                     loss_risk = float(self.xgb_loss_model.predict(obs_array)[0])
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("XGBoost loss model inference failure: %s", e)
 
         # Trade decision logic
         trade_occurred = False

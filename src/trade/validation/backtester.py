@@ -1,30 +1,40 @@
-"""Backtesting engine: run a model against historical data."""
+"""Backtester: runs a trained policy in the trading environment and computes metrics."""
 
 from __future__ import annotations
 
 import datetime as dt
 import logging
-from typing import Any
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from stable_baselines3 import PPO
 
 from trade.core.types import BacktestResult, ModelVersion
-from trade.data.features import FeatureEngine
 from trade.env.trading_env import TradingEnv
 from trade.validation import metrics as m
 
 logger = logging.getLogger(__name__)
 
 
-class Backtester:
-    """Runs a frozen model against historical data.
+def get_periods_per_year(timeframe: str) -> int:
+    """Map timeframe string to annualized period multiplier."""
+    tf = timeframe.lower()
+    if tf in {"1m", "1min"}:
+        return 252 * 24 * 60  # 362,880 for continuous crypto
+    if tf in {"5m", "5min"}:
+        return 252 * 24 * 12  # 72,576
+    if tf in {"15m", "15min"}:
+        return 252 * 24 * 4   # 24,192
+    if tf in {"1h", "60m"}:
+        return 252 * 24        # 6,048
+    if tf in {"4h", "240m"}:
+        return 252 * 6         # 1,512
+    return 252                 # Default daily
 
-    Simulates the full trading loop with the same environment used
-    for training, collecting detailed trade logs and equity curves
-    for analysis.
-    """
+
+class Backtester:
+    """Executes a trained RL policy through the historical environment."""
 
     def __init__(
         self,
@@ -32,30 +42,23 @@ class Backtester:
         commission_pct: float = 0.001,
         slippage_pct: float = 0.0005,
         feature_window: int = 30,
+        timeframe: str = "1d",
     ) -> None:
         self.initial_capital = initial_capital
         self.commission_pct = commission_pct
         self.slippage_pct = slippage_pct
         self.feature_window = feature_window
+        self.timeframe = timeframe
+        self.periods_per_year = get_periods_per_year(timeframe)
 
     def run(
         self,
-        model_path: str,
+        model_path: str | Path,
         features_df: pd.DataFrame,
         feature_columns: list[str],
         model_version: ModelVersion | None = None,
     ) -> BacktestResult:
-        """Run a backtest with a saved model.
-
-        Args:
-            model_path: Path to the saved SB3 model file.
-            features_df: DataFrame with OHLCV + computed features.
-            feature_columns: List of feature column names.
-            model_version: Version descriptor for the model.
-
-        Returns:
-            BacktestResult with full metrics, equity curve, and trade log.
-        """
+        """Run backtest on provided feature data."""
         if model_version is None:
             model_version = ModelVersion(major=0, minor=0, patch=0)
 
@@ -67,7 +70,7 @@ class Backtester:
             commission_pct=self.commission_pct,
             slippage_pct=self.slippage_pct,
             feature_window=self.feature_window,
-            reward_function="pnl",  # Use raw PnL for backtest clarity
+            reward_function="pnl",
         )
 
         # Load model
@@ -77,7 +80,7 @@ class Backtester:
         # Run episode
         obs, info = env.reset()
         equity_curve = [self.initial_capital]
-        daily_returns: list[float] = []
+        bar_returns: list[float] = []
         done = False
 
         while not done:
@@ -90,20 +93,17 @@ class Backtester:
 
             if len(equity_curve) >= 2:
                 prev = equity_curve[-2]
-                daily_ret = (portfolio_value - prev) / prev if prev > 0 else 0.0
-                daily_returns.append(daily_ret)
+                ret = (portfolio_value - prev) / prev if prev > 0 else 0.0
+                bar_returns.append(ret)
 
         # Compute metrics
         equity_arr = np.array(equity_curve)
-        returns_arr = np.array(daily_returns)
+        returns_arr = np.array(bar_returns)
         trade_log = env.trade_log
 
-        # Extract closed trade PnLs and friction costs
-        trade_pnls = [t.get("net_pnl", t.get("pnl", 0.0)) for t in trade_log if "net_pnl" in t or "pnl" in t]
-        trade_values = [t.get("entry_price", t.get("price", 0.0)) * t.get("quantity", t.get("shares", 0.0)) for t in trade_log]
+        # Extract closed trade PnLs and actual friction costs (no fallback fabrication)
+        trade_pnls = [t["net_pnl"] for t in trade_log if "net_pnl" in t]
         total_costs = sum(t.get("entry_fee", 0.0) + t.get("exit_fee", 0.0) + t.get("slippage_cost", 0.0) for t in trade_log)
-        if total_costs <= 0 and trade_values:
-            total_costs = m.total_transaction_costs(trade_values, self.commission_pct)
 
         # Determine date range from features_df index
         if hasattr(features_df.index, 'date'):
@@ -120,13 +120,13 @@ class Backtester:
             initial_capital=self.initial_capital,
             final_capital=float(equity_curve[-1]),
             total_return=m.total_return(equity_arr),
-            sharpe_ratio=m.sharpe_ratio(returns_arr),
+            sharpe_ratio=m.sharpe_ratio(returns_arr, periods_per_year=self.periods_per_year),
             max_drawdown=m.max_drawdown(equity_arr),
             win_rate=m.win_rate(trade_pnls) if trade_pnls else 0.0,
             profit_factor=m.profit_factor(trade_pnls) if trade_pnls else 0.0,
             total_trades=len(trade_pnls) if trade_pnls else len(trade_log),
             transaction_costs=float(total_costs),
-            daily_returns=daily_returns,
+            daily_returns=bar_returns,
             equity_curve=equity_curve,
             trade_log=trade_log,
         )

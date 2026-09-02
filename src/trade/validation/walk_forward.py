@@ -33,12 +33,22 @@ class WalkForwardResult:
     window_results: list[dict] = field(default_factory=list)
 
 
+def infer_bars_per_day(df: pd.DataFrame) -> int:
+    """Infer the number of bars per day from dataframe index or timestamps."""
+    if isinstance(df.index, pd.DatetimeIndex) and len(df) >= 2:
+        diffs = df.index.to_series().diff().dropna()
+        median_seconds = diffs.dt.total_seconds().median()
+        if median_seconds and median_seconds > 0:
+            bars_per_day = int(round(86400.0 / median_seconds))
+            return max(1, bars_per_day)
+    return 1
+
+
 class WalkForwardValidator:
     """Performs rolling walk-forward validation.
 
     Splits data into strictly chronological, non-overlapping train,
-    validation, and test windows. Supports optional per-window retraining
-    via `train_callback` to eliminate lookahead bias and model staleness.
+    validation, and test windows. Supports calendar-time aware scaling for sub-daily bars.
     """
 
     def __init__(
@@ -51,6 +61,7 @@ class WalkForwardValidator:
         slippage_pct: float = 0.0005,
         feature_window: int = 30,
         validation_window_days: int = 42,
+        timeframe: str = "1d",
     ) -> None:
         self.train_window_days = train_window_days
         self.test_window_days = test_window_days
@@ -60,6 +71,7 @@ class WalkForwardValidator:
         self.slippage_pct = slippage_pct
         self.feature_window = feature_window
         self.validation_window_days = max(0, validation_window_days)
+        self.timeframe = timeframe
 
     def validate(
         self,
@@ -69,27 +81,30 @@ class WalkForwardValidator:
         model_version: ModelVersion | None = None,
         train_callback: Callable[[pd.DataFrame, pd.DataFrame, list[str]], str] | None = None,
     ) -> WalkForwardResult:
-        """Run walk-forward validation across multiple windows.
-
-        Args:
-            model_path: Path to the base saved model.
-            features_df: Full feature DataFrame.
-            feature_columns: Feature column names.
-            model_version: Model version descriptor.
-            train_callback: Optional callable (train_df, val_df, feature_cols) -> retrained_model_path.
-
-        Returns:
-            WalkForwardResult with aggregated out-of-sample metrics.
-        """
+        """Run walk-forward validation across multiple windows."""
         if model_version is None:
             model_version = ModelVersion(major=0, minor=0, patch=0)
 
-        # Chronological order is a precondition, never silently shuffle data.
         if isinstance(features_df.index, pd.DatetimeIndex) and not features_df.index.is_monotonic_increasing:
             features_df = features_df.sort_index().copy()
+
         n_bars = len(features_df)
-        validation_window = self.validation_window_days
-        total_window = self.train_window_days + validation_window + self.test_window_days
+        bars_per_day = infer_bars_per_day(features_df)
+
+        # Scale day-based configuration to actual bar indices
+        train_bars = self.train_window_days * bars_per_day
+        val_bars = self.validation_window_days * bars_per_day
+        test_bars = self.test_window_days * bars_per_day
+        step_bars = self.step_days * bars_per_day
+
+        # Fallback to direct row counts if dataframe is smaller than 1 full calendar cycle
+        if train_bars + val_bars + test_bars > n_bars:
+            train_bars = self.train_window_days
+            val_bars = self.validation_window_days
+            test_bars = self.test_window_days
+            step_bars = self.step_days
+
+        total_window = train_bars + val_bars + test_bars
         window_results: list[dict] = []
 
         backtester = Backtester(
@@ -97,29 +112,26 @@ class WalkForwardValidator:
             commission_pct=self.commission_pct,
             slippage_pct=self.slippage_pct,
             feature_window=self.feature_window,
+            timeframe=self.timeframe,
         )
 
-        # Generate windows
         start = 0
         window_id = 0
 
         while start + total_window <= n_bars:
-            train_end = start + self.train_window_days
-            validation_end = train_end + validation_window
-            test_end = validation_end + self.test_window_days
+            train_end = start + train_bars
+            validation_end = train_end + val_bars
+            test_end = validation_end + test_bars
 
-            # These slices are deliberately materialized and never overlap.
             train_df = features_df.iloc[start:train_end].copy()
             validation_df = features_df.iloc[train_end:validation_end].copy()
             test_df = features_df.iloc[validation_end:test_end].copy()
 
-            # Only evaluate on the test (OOS) window
             if len(test_df) < self.feature_window + 10:
-                start += self.step_days
+                start += step_bars
                 continue
 
             active_model_path = model_path
-            # Per-window retraining if callback provided
             if train_callback is not None:
                 try:
                     active_model_path = train_callback(train_df, validation_df, feature_columns)
@@ -139,60 +151,52 @@ class WalkForwardValidator:
                     "window_id": window_id,
                     "train_start": start,
                     "train_end": train_end,
-                    "validation_start": train_end,
-                    "validation_end": validation_end,
+                    "val_start": train_end,
+                    "val_end": validation_end,
                     "test_start": validation_end,
                     "test_end": test_end,
-                    "train_rows": len(train_df),
-                    "validation_rows": len(validation_df),
-                    "test_rows": len(test_df),
-                    "oos_sharpe": result.sharpe_ratio,
-                    "oos_return": result.total_return,
-                    "oos_max_drawdown": result.max_drawdown,
-                    "oos_trades": result.total_trades,
-                    "oos_win_rate": result.win_rate,
-                    "oos_profit_factor": result.profit_factor,
-                    "oos_fees": result.transaction_costs,
-                    "oos_turnover": sum(abs(float(t.get("price", 0)) * float(t.get("shares", t.get("quantity", 0)))) for t in result.trade_log),
+                    "total_return": result.total_return,
+                    "sharpe_ratio": result.sharpe_ratio,
+                    "max_drawdown": result.max_drawdown,
+                    "win_rate": result.win_rate,
+                    "profit_factor": result.profit_factor,
+                    "total_trades": result.total_trades,
+                    "daily_returns": result.daily_returns,
                 })
             except Exception:
-                logger.warning("Walk-forward window %d failed", window_id, exc_info=True)
+                logger.warning("Backtest failed for window %d", window_id, exc_info=True)
 
-            start += self.step_days
+            start += step_bars
             window_id += 1
 
         if not window_results:
-            logger.warning("No valid walk-forward windows generated")
             return WalkForwardResult(model_version=model_version)
 
-        # Aggregate OOS metrics
-        oos_sharpes = [w["oos_sharpe"] for w in window_results]
-        oos_returns = [w["oos_return"] for w in window_results]
-        oos_mdds = [w["oos_max_drawdown"] for w in window_results]
+        returns = [w["total_return"] for w in window_results]
+        sharpes = [w["sharpe_ratio"] for w in window_results]
+        drawdowns = [w["max_drawdown"] for w in window_results]
 
-        result = WalkForwardResult(
+        all_returns = []
+        for w in window_results:
+            all_returns.extend(w["daily_returns"])
+
+        oos_sharpe_mean = float(np.mean(sharpes))
+        oos_sharpe_std = float(np.std(sharpes, ddof=1)) if len(sharpes) > 1 else 0.0
+
+        if all_returns:
+            pooled_sharpe = m.sharpe_ratio(all_returns, periods_per_year=backtester.periods_per_year)
+            oos_sharpe_mean = pooled_sharpe
+
+        return WalkForwardResult(
             model_version=model_version,
             n_windows=len(window_results),
-            oos_sharpe_mean=float(np.mean(oos_sharpes)),
-            oos_sharpe_std=float(np.std(oos_sharpes)),
-            oos_return_mean=float(np.mean(oos_returns)),
-            oos_max_drawdown_mean=float(np.mean(oos_mdds)),
-            oos_return_median=float(np.median(oos_returns)),
-            oos_return_std=float(np.std(oos_returns)),
-            positive_window_ratio=float(np.mean(np.asarray(oos_returns) > 0)),
-            worst_window_return=float(np.min(oos_returns)),
+            oos_sharpe_mean=oos_sharpe_mean,
+            oos_sharpe_std=oos_sharpe_std,
+            oos_return_mean=float(np.mean(returns)),
+            oos_max_drawdown_mean=float(np.mean(drawdowns)),
+            oos_return_median=float(np.median(returns)),
+            oos_return_std=float(np.std(returns, ddof=1)) if len(returns) > 1 else 0.0,
+            positive_window_ratio=float(np.mean([1.0 if r > 0 else 0.0 for r in returns])),
+            worst_window_return=float(np.min(returns)),
             window_results=window_results,
         )
-
-        logger.info(
-            "Walk-forward %s: %d windows | OOS Sharpe: %.2f ± %.2f | "
-            "OOS Return: %.2f%% | OOS MDD: %.2f%%",
-            model_version.tag,
-            result.n_windows,
-            result.oos_sharpe_mean,
-            result.oos_sharpe_std,
-            result.oos_return_mean * 100,
-            result.oos_max_drawdown_mean * 100,
-        )
-
-        return result

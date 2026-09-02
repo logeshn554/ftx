@@ -1,4 +1,4 @@
-"""Canonical trading decision service with Edge Gate and No-Trade audit logging."""
+"""Canonical trading decision service with Edge Gate, Regime Engine, Calibrated Probability and Uncertainty."""
 
 from __future__ import annotations
 
@@ -6,13 +6,19 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+import numpy as np
+
 from trade.data.contract import observation_columns
 from trade.execution.cost_model import CostConfig, CostModel
 from trade.intelligence.decision import Decision, DecisionPipeline
 from trade.intelligence.expected_value import ExpectedValueFilter
+from trade.intelligence.probability_calibrator import CalibratedProbabilityEstimator
+from trade.intelligence.regime import MarketRegime, RegimeClassification, RegimeEngine
 from trade.intelligence.strategy_selector import StrategySelector
 from trade.intelligence.target_engine import TargetEngine
+from trade.intelligence.uncertainty import UncertaintyEstimate, UncertaintyEstimator
 from trade.risk.cooldown import CooldownConfig, CooldownController
+from trade.risk.limits import RiskLimits
 from trade.risk.position_sizing import position_size
 from trade.risk.survival import SurvivalController, SurvivalState
 from trade.strategies.base import Signal, Strategy
@@ -66,7 +72,7 @@ class TradeDecision:
 
 class DecisionEngine:
     """Canonical Trading Pipeline:
-    Market Data -> Features -> Regime -> Strategies -> Strategy Selection -> Edge Gate -> Cost Filter -> Risk & Sizing -> Decision
+    Market Data -> Features -> Regime Engine -> Strategies -> Strategy Selection -> Edge Gate -> Grounded Uncertainty -> Risk Sizing -> Decision
     """
 
     def __init__(
@@ -80,6 +86,10 @@ class DecisionEngine:
         strategies: list[Strategy] | None = None,
         cooldown_config: CooldownConfig | None = None,
         strategy_selector: StrategySelector | None = None,
+        regime_engine: RegimeEngine | None = None,
+        probability_calibrator: CalibratedProbabilityEstimator | None = None,
+        uncertainty_estimator: UncertaintyEstimator | None = None,
+        risk_limits: RiskLimits | None = None,
     ):
         self.model_version = model_version
         self.strategy_version = strategy_version
@@ -90,6 +100,10 @@ class DecisionEngine:
         self.survival = SurvivalController()
         self.cooldown = CooldownController(cooldown_config)
         self.strategy_selector = strategy_selector or StrategySelector()
+        self.regime_engine = regime_engine or RegimeEngine()
+        self.probability_calibrator = probability_calibrator or CalibratedProbabilityEstimator()
+        self.uncertainty_estimator = uncertainty_estimator or UncertaintyEstimator()
+        self.risk_limits = risk_limits or RiskLimits()
         self.strategies: list[Strategy] = strategies or [
             TrendStrategy(),
             MeanReversionStrategy(),
@@ -143,12 +157,32 @@ class DecisionEngine:
         regime_performance: dict[str, dict] | None = None,
         uncertainty: float | None = None,
     ) -> TradeDecision:
+        # Automatic Regime Detection if unassigned
+        if regime == "UNKNOWN" or regime_confidence <= 0.0:
+            reg_class = self.regime_engine.classify(indicators)
+            regime = reg_class.name
+            regime_confidence = reg_class.confidence
+
+        atr_pct = float(indicators.get("atr_pct", indicators.get("atr_14", 1.0)))
+
+        # Automatic Grounded Uncertainty Estimation if not provided
+        if uncertainty is None:
+            feat_vec = [
+                float(indicators.get("adx", 15.0)),
+                float(indicators.get("rsi_14", 50.0)),
+                atr_pct,
+                float(indicators.get("bb_width_pct", 2.0)),
+            ]
+            unc_est = self.uncertainty_estimator.estimate(feat_vec, current_volatility_pct=atr_pct)
+            uncertainty = unc_est.total_uncertainty
+
         audit: dict[str, Any] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "price": entry_price,
             "equity": equity,
             "regime": regime,
             "regime_confidence": regime_confidence,
+            "epistemic_uncertainty": uncertainty,
         }
 
         # 1. Survival Controller Gate (Hard Halt)
@@ -170,19 +204,22 @@ class DecisionEngine:
         if not can_enter:
             return self._hold(f"cooldown_blocked_{cooldown_reason.lower()}", audit)
 
-        # 3. Regime Confidence Gate
+        # 3. Panic Crash Regime Circuit Breaker
+        if regime == MarketRegime.PANIC_CRASH.value:
+            return self._hold("panic_crash_regime_circuit_breaker", audit)
+
+        # 4. Regime Confidence Gate
         if regime_confidence < 0.4 and regime != "UNKNOWN":
             return self._hold("regime_confidence_insufficient", audit)
 
-        # 4. Strategy Signal Generation
+        # 5. Strategy Signal Generation
         signal = self._best_signal(indicators, regime=regime, regime_performance=regime_performance)
         audit["strategy"] = signal.strategy
         audit["signal_reason"] = signal.reason
         if signal.side == "HOLD":
             return self._hold("no_strategy_signal", audit)
 
-        # 5. Target Engine & Cost Feasibility Gate
-        atr_pct = float(indicators.get("atr_pct", indicators.get("atr_14", 0.0)))
+        # 6. Target Engine & Cost Feasibility Gate
         target_plan = self.target_engine.plan(
             atr_pct=atr_pct,
             expected_move_pct=signal.expected_move,
@@ -192,8 +229,17 @@ class DecisionEngine:
         if not target_plan.should_trade:
             return self._hold(target_plan.reason, audit, signal)
 
-        # 6. Edge Gate & No-Trade Filter (Zero fabricated probability)
+        # 7. Calibrated Probability Prediction
         calibrated_p_win = p_win
+        if calibrated_p_win is None:
+            feat_arr = np.array([
+                float(indicators.get("adx", 15.0)),
+                float(indicators.get("rsi_14", 50.0)),
+                atr_pct,
+                float(indicators.get("momentum_20", 0.0)),
+            ])
+            calibrated_p_win = self.probability_calibrator.predict_p_win(feat_arr)
+
         if calibrated_p_win is None and hasattr(signal, "probability"):
             calibrated_p_win = getattr(signal, "probability")
 
@@ -227,7 +273,7 @@ class DecisionEngine:
                 uncertainty=unc,
             )
 
-        # 7. Risk-Anchored Position Sizing
+        # 8. Risk-Anchored Position Sizing
         stop_dist = entry_price * (target_plan.stop_loss_pct / 100)
         qty = position_size(
             equity=equity,
@@ -238,6 +284,7 @@ class DecisionEngine:
             volatility=atr_pct / 100 if atr_pct else 0.01,
             drawdown=drawdown,
             reward_to_risk=target_plan.take_profit_pct / max(target_plan.stop_loss_pct, 0.01),
+            risk_limits=self.risk_limits,
         )
         if qty <= 0:
             return self._hold("position_size_zero", audit, signal)
@@ -282,7 +329,7 @@ class DecisionEngine:
         conf = signal.confidence if signal else 0.0
         unc = uncertainty if uncertainty > 0 else max(0.0, 1.0 - conf)
         cost_pct = self.cost_model.estimated_round_trip_cost_pct()
-        
+
         rejection_record = {
             "timestamp": audit.get("timestamp", datetime.now(timezone.utc).isoformat()),
             "proposed_side": signal.side if signal else None,

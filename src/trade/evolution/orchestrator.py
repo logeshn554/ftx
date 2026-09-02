@@ -175,10 +175,11 @@ class EvolutionOrchestrator:
 
     def run_full_evolution(
         self,
+        candidate_evaluations: dict[str, dict[str, Any]] | None = None,
         walk_forward_runner: Any = None,
         count: int = 3,
     ) -> dict[str, Any]:
-        """Full end-to-end evolution pipeline (Bug #6 fix)."""
+        """Full end-to-end evolution pipeline consuming ONLY verified evidence."""
         if not self.should_trigger_evolution():
             return {"status": "SKIPPED", "reason": "evolution_trigger_conditions_not_met"}
 
@@ -186,17 +187,43 @@ class EvolutionOrchestrator:
         evaluation_results: list[dict] = []
         promoted = False
 
+        candidate_evaluations = candidate_evaluations or {}
+
         for candidate in candidates:
-            eval_res = self.evaluate_candidate(candidate=candidate, cost_stress_net_return=1.0)
+            # Consume actual evaluation evidence if supplied, otherwise require evaluation
+            evidence = candidate_evaluations.get(candidate.candidate_id, {})
+            wf_res = evidence.get("walk_forward", None)
+            champ_metrics = evidence.get("champion_metrics", None)
+            chal_metrics = evidence.get("challenger_metrics", None)
+            cost_stress_ret = float(evidence.get("cost_stress_net_return", 0.0))
+            candidate_pnls = evidence.get("candidate_trade_pnls", None)
+
+            eval_res = self.evaluate_candidate(
+                candidate=candidate,
+                walk_forward_result=wf_res,
+                champion_metrics=champ_metrics,
+                challenger_metrics=chal_metrics,
+                cost_stress_net_return=cost_stress_ret,
+                candidate_trade_pnls=candidate_pnls,
+            )
+
+            champ_sharpe = float(champ_metrics.get("sharpe", 0.0)) if champ_metrics else 0.0
+            chal_sharpe = float(chal_metrics.get("sharpe", 0.0)) if chal_metrics else 0.0
+            champ_exp = float(champ_metrics.get("expectancy", 0.0)) if champ_metrics else 0.0
+            chal_exp = float(chal_metrics.get("expectancy", 0.0)) if chal_metrics else 0.0
+            chal_mdd = float(chal_metrics.get("max_drawdown", 1.0)) if chal_metrics else 1.0
+            chal_pf = float(chal_metrics.get("profit_factor", 0.0)) if chal_metrics else 0.0
+            chal_trades = int(chal_metrics.get("total_trades", 0)) if chal_metrics else 0
+
             decision = self.selector.decide(
                 evaluation=eval_res,
-                champion_sharpe=1.0,
-                challenger_sharpe=1.3,
-                champion_expectancy=0.01,
-                challenger_expectancy=0.02,
-                challenger_max_drawdown=0.10,
-                challenger_profit_factor=1.5,
-                challenger_trade_count=50,
+                champion_sharpe=champ_sharpe,
+                challenger_sharpe=chal_sharpe,
+                champion_expectancy=champ_exp,
+                challenger_expectancy=chal_exp,
+                challenger_max_drawdown=chal_mdd,
+                challenger_profit_factor=chal_pf,
+                challenger_trade_count=chal_trades,
             )
 
             if decision.promote and not promoted:

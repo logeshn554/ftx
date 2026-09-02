@@ -1,13 +1,10 @@
-"""Deterministic conservative risk-aware position sizing.
-
-Features:
-- Stop-distance anchored sizing (1R risk budget)
-- Kelly criterion fraction cap
-- Volatility and drawdown scaling
-- Strict upper bounds that cannot be overridden by high confidence
-"""
+"""Deterministic conservative risk-aware position sizing."""
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from trade.risk.limits import RiskLimits
 
 
 def position_size(
@@ -22,6 +19,7 @@ def position_size(
     max_position_pct: float = 0.20,
     uncertainty: float = 0.0,
     reward_to_risk: float = 1.5,
+    risk_limits: RiskLimits | None = None,
 ) -> float:
     """Compute risk-anchored position size.
 
@@ -37,19 +35,23 @@ def position_size(
         max_position_pct: Maximum position notional as fraction of equity (e.g. 0.20 = 20%)
         uncertainty: Epistemic uncertainty (0.0 to 1.0, reduces size)
         reward_to_risk: Expected target to stop ratio
+        risk_limits: Optional canonical RiskLimits configuration
 
     Returns:
         Safe quantity to trade (non-negative).
     """
+    if risk_limits is not None:
+        max_position_pct = risk_limits.max_position_pct / 100.0 if risk_limits.max_position_pct > 1.0 else risk_limits.max_position_pct
+        max_risk_per_trade = risk_limits.max_order_pct / 100.0 if risk_limits.max_order_pct > 1.0 else risk_limits.max_order_pct
+
     if min(equity, entry_price, stop_distance) <= 0 or edge <= 0 or confidence <= 0:
         return 0.0
 
     # 1. Base Dollar Risk Budget (1R)
-    # Scales down linearly with drawdown: 0% DD -> 100% budget, 20% DD -> 80% budget
     drawdown_penalty = max(0.0, 1.0 - min(drawdown, 1.0))
     dollar_risk_budget = equity * max(0.0, max_risk_per_trade) * drawdown_penalty
 
-    # 2. Confidence and Uncertainty Dampening (strictly in [0.0, 1.0], never inflates)
+    # 2. Confidence and Uncertainty Dampening
     confidence_scale = min(1.0, max(0.0, confidence))
     uncertainty_penalty = max(0.0, 1.0 - min(uncertainty, 1.0))
     risk_adjustment = confidence_scale * uncertainty_penalty
@@ -61,15 +63,15 @@ def position_size(
     effective_risk = dollar_risk_budget * risk_adjustment * volatility_adjustment
     qty_by_risk = effective_risk / stop_distance
 
-    # 5. Half-Kelly Sizing Cap: f* = (p*b - q) / b = edge / b
+    # 5. Edge-Scaled Fraction Cap: f* = min(1.0, edge / b)
     b = max(reward_to_risk, 0.5)
-    kelly_fraction = max(0.0, min(1.0, edge / b))
-    half_kelly_cap_notional = equity * kelly_fraction * 0.5
-    qty_by_kelly = half_kelly_cap_notional / entry_price if half_kelly_cap_notional > 0 else qty_by_risk
+    edge_scaled_fraction = max(0.0, min(1.0, edge / b))
+    edge_capped_notional = equity * edge_scaled_fraction * 0.5
+    qty_by_edge = edge_capped_notional / entry_price if edge_capped_notional > 0 else qty_by_risk
 
     # 6. Hard Notional Cap
     hard_cap_qty = (equity * max_position_pct) / entry_price
 
     # Return minimum of all safety constraints
-    final_qty = min(qty_by_risk, qty_by_kelly, hard_cap_qty)
+    final_qty = min(qty_by_risk, qty_by_edge, hard_cap_qty)
     return max(0.0, round(final_qty, 8))
