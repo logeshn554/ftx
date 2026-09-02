@@ -79,24 +79,28 @@ class TradingEnv(gym.Env):
         terminated = self._portfolio_value <= self.initial_capital * 0.5 or self._get_drawdown() > self.max_drawdown_limit
         truncated = self._current_step >= len(self.features_df)
         if truncated and self._accounting.position:
-            closed = self._accounting.close(self._get_current_price())
-            if closed:
-                self._trade_log.append({"step": self._current_step, "action": "LIQUIDATE", **closed.to_dict()})
-            self._portfolio_value = self._accounting.equity(self._get_current_price())
+            self.force_flat(reason="LIQUIDATE")
         info = self._get_info()
         info.update(action=action_enum.name, step_return=step_return)
         return self._get_observation(), reward, terminated, truncated, info
 
+    def force_flat(self, price: float | None = None, reason: str = "LIQUIDATE") -> Any:
+        """Force position closure to flat outside of policy action space (e.g. risk/stop/kill switch)."""
+        current_price = price if price is not None else self._get_current_price()
+        if self._accounting.position:
+            closed = self._accounting.close(current_price)
+            if closed:
+                self._trade_log.append({"step": self._current_step, "action": reason, **closed.to_dict()})
+                self._portfolio_value = self._accounting.equity(current_price)
+                return closed
+        return None
+
     def _execute_action(self, action: Action, price: float) -> None:
         # Target Position Semantics:
-        # Action.HOLD (0) -> Target: FLAT (0). Closes open position if any, stays in cash.
-        # Action.BUY (1)  -> Target: LONG (+1). Holds if already long, opens if flat, closes if short.
-        # Action.SELL (2) -> Target: SHORT (-1). Holds if already short, opens if flat, closes if long.
+        # Action.HOLD (0) -> Maintain current exposure (zero turnover, zero fees).
+        # Action.BUY (1)  -> Target Long (+1). Holds if already long, opens if flat, flips short->long on same step.
+        # Action.SELL (2) -> Target Short (-1). Holds if already short, opens if flat, flips long->short on same step.
         if action == Action.HOLD:
-            if self._accounting.position != 0:
-                closed = self._accounting.close(price)
-                if closed:
-                    self._trade_log.append({"step": self._current_step, "action": "CLOSE", **closed.to_dict()})
             return
 
         target_side = "BUY" if action == Action.BUY else "SELL"
@@ -105,11 +109,10 @@ class TradingEnv(gym.Env):
             return
 
         if self._accounting.position != 0:
-            # Reversal: close opposite exposure to flat first
+            # Reversal: close opposite exposure to flat before opening target exposure on same step
             closed = self._accounting.close(price)
             if closed:
                 self._trade_log.append({"step": self._current_step, "action": "CLOSE", **closed.to_dict()})
-            return
 
         # Open new position
         quantity = max(0.0, self._accounting.equity(price) * self.position_size_pct / max(price, 1e-12))

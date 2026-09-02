@@ -89,29 +89,54 @@ const equityChart = new Chart(ctx, {
     },
 });
 
-// WebSocket Connection & Dual-Mode Telemetry Stream
+// Multi-Channel Connection Manager (WebSocket -> Server-Sent Events -> Fast Polling)
 let ws = null;
+let eventSource = null;
 let reconnectTimer = null;
 let fallbackPollingTimer = null;
+let currentConnMode = 'CONNECTING';
+
+function setConnectionStatus(mode, isLive) {
+    currentConnMode = mode;
+    state.connected = isLive;
+    const dot = document.getElementById('conn-dot');
+    const text = document.getElementById('conn-status-text');
+    if (dot) {
+        dot.className = isLive ? 'status-dot status-dot--active' : 'status-dot status-dot--warning';
+    }
+    if (text) {
+        text.textContent = isLive ? `LIVE (${mode})` : mode;
+        text.className = isLive ? 'status-value highlight-green' : 'status-value highlight-orange';
+    }
+}
+
+function initConnection() {
+    // Try WebSocket first
+    connectWebSocket();
+}
 
 function connectWebSocket() {
     try {
         if (ws) {
             try { ws.close(); } catch (e) {}
+            ws = null;
         }
         ws = new WebSocket(WS_URL);
 
         ws.onopen = () => {
-            state.connected = true;
+            setConnectionStatus('WebSocket', true);
             stopFallbackPolling();
-            addEvent('success', '⚡ Real-time Bitcoin trading stream connected');
+            stopSSE();
+            addEvent('success', '⚡ Real-time Bitcoin trading stream connected (WebSocket)');
         };
 
         ws.onmessage = (event) => {
             try {
                 const msg = JSON.parse(event.data);
-                if (msg.type === 'pipeline_telemetry') {
+                if (msg.type === 'pipeline_telemetry' && msg.data) {
                     handleTelemetry(msg.data);
+                } else if (msg.btc_price !== undefined) {
+                    handleTelemetry(msg);
                 }
             } catch (e) {
                 console.warn('Invalid WS payload:', event.data);
@@ -119,44 +144,90 @@ function connectWebSocket() {
         };
 
         ws.onclose = () => {
+            if (state.connected) {
+                addEvent('warning', '⚠️ WebSocket disconnected, switching to Server-Sent Events...');
+            }
             state.connected = false;
-            startFallbackPolling();
-            scheduleReconnect();
+            connectSSE();
+            scheduleWSReconnect();
         };
 
         ws.onerror = () => {
             state.connected = false;
-            startFallbackPolling();
+            connectSSE();
         };
     } catch (e) {
-        startFallbackPolling();
-        scheduleReconnect();
+        connectSSE();
+        scheduleWSReconnect();
     }
 }
 
-function scheduleReconnect() {
+function connectSSE() {
+    if (eventSource) return;
+    try {
+        eventSource = new EventSource(`${API_BASE}/api/stream`);
+        eventSource.onopen = () => {
+            setConnectionStatus('SSE Stream', true);
+            stopFallbackPolling();
+        };
+        eventSource.onmessage = (event) => {
+            try {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'pipeline_telemetry' && msg.data) {
+                    handleTelemetry(msg.data);
+                } else if (msg.btc_price !== undefined) {
+                    handleTelemetry(msg);
+                }
+            } catch (e) {}
+        };
+        eventSource.onerror = () => {
+            stopSSE();
+            startFallbackPolling();
+        };
+    } catch (e) {
+        stopSSE();
+        startFallbackPolling();
+    }
+}
+
+function stopSSE() {
+    if (eventSource) {
+        try { eventSource.close(); } catch (e) {}
+        eventSource = null;
+    }
+}
+
+function scheduleWSReconnect() {
     if (reconnectTimer) return;
     reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
-        connectWebSocket();
-    }, 2500);
+        if (!state.connected || currentConnMode !== 'WebSocket') {
+            connectWebSocket();
+        }
+    }, 4000);
 }
 
 function startFallbackPolling() {
     if (fallbackPollingTimer) return;
-    fallbackPollingTimer = setInterval(async () => {
-        if (state.connected) {
-            stopFallbackPolling();
-            return;
+    setConnectionStatus('Fast Polling', true);
+    // Immediate poll
+    pollState();
+    fallbackPollingTimer = setInterval(pollState, 1500);
+}
+
+async function pollState() {
+    try {
+        const res = await fetch(`${API_BASE}/api/state`, { cache: 'no-store' });
+        if (res.ok) {
+            const data = await res.json();
+            setConnectionStatus('Polling', true);
+            handleTelemetry(data);
+        } else {
+            setConnectionStatus('CONNECTING...', false);
         }
-        try {
-            const res = await fetch(`${API_BASE}/api/state`);
-            if (res.ok) {
-                const data = await res.json();
-                handleTelemetry(data);
-            }
-        } catch (e) {}
-    }, 1000);
+    } catch (e) {
+        setConnectionStatus('OFFLINE', false);
+    }
 }
 
 function stopFallbackPolling() {
@@ -179,7 +250,7 @@ function handleTelemetry(data) {
         document.getElementById('regime-status').textContent = data.regime;
     }
 
-    // 2. Account KPIs ($100 virtual balance)
+    // 2. Account KPIs ($10 virtual balance)
     if (data.equity !== undefined) {
         document.getElementById('equity-value').textContent = `$${data.equity.toFixed(2)}`;
         
@@ -192,10 +263,22 @@ function handleTelemetry(data) {
         equityChart.data.labels = state.labels;
         equityChart.data.datasets[0].data = state.equityCurve;
         equityChart.update('none');
+
+        const eqDeltaEl = document.getElementById('equity-delta');
+        if (eqDeltaEl && data.daily_return !== undefined) {
+            const retPct = Number(data.daily_return * 100);
+            eqDeltaEl.textContent = `${retPct >= 0 ? '+' : ''}${retPct.toFixed(2)}%`;
+            eqDeltaEl.className = retPct >= 0 ? 'kpi-delta kpi-delta--positive' : 'kpi-delta kpi-delta--negative';
+        }
     }
 
     if (data.cash_balance !== undefined) {
         document.getElementById('cash-value').textContent = `$${data.cash_balance.toFixed(2)}`;
+        const cashSub = document.getElementById('cash-base-sub');
+        if (cashSub && data.equity) {
+            const cashPct = Math.round((data.cash_balance / Math.max(data.equity, 0.01)) * 100);
+            cashSub.textContent = `Cash Pool: ${cashPct}% of Eq`;
+        }
     }
 
     if (data.daily_pnl !== undefined) {
@@ -210,19 +293,23 @@ function handleTelemetry(data) {
 
         if (data.daily_return !== undefined) {
             const retNum = Number(data.daily_return * 100);
-            pnlDelta.textContent = `${retNum >= 0 ? '+' : ''}${retNum.toFixed(2)}%`;
+            pnlDelta.textContent = `${retNum >= 0 ? '+' : ''}${retNum.toFixed(2)}% ROI`;
             pnlDelta.className = retNum >= 0 ? 'kpi-delta kpi-delta--positive' : 'kpi-delta kpi-delta--negative';
         }
     }
 
     if (data.total_trades !== undefined) {
         document.getElementById('trades-count-val').textContent = data.total_trades;
-        document.getElementById('win-rate-val').textContent = `Win Rate: ${data.win_rate || 0}%`;
+        const winCnt = data.winning_trades !== undefined ? data.winning_trades : (Math.round((data.win_rate || 0) * data.total_trades / 100));
+        const lossCnt = Math.max(0, data.total_trades - winCnt);
+        document.getElementById('win-rate-val').textContent = `Win Rate: ${data.win_rate || 0}% (${winCnt}W / ${lossCnt}L)`;
     }
 
     if (data.total_fees_paid !== undefined) {
         const feesEl = document.getElementById('fees-total-val');
-        if (feesEl) feesEl.textContent = `$${Number(data.total_fees_paid).toFixed(3)}`;
+        if (feesEl) feesEl.textContent = `-$${Number(data.total_fees_paid).toFixed(3)}`;
+        const feesSub = document.getElementById('fees-roundtrip-sub');
+        if (feesSub) feesSub.textContent = `Fee: ${data.trading_fee_pct || 0.1}% / leg`;
     }
 
     if (data.drawdown !== undefined) {
@@ -234,11 +321,31 @@ function handleTelemetry(data) {
     if (data.detected_pattern) {
         document.getElementById('pipe-pattern-name').textContent = data.detected_pattern;
     }
+    if (data.candidate_patterns && data.candidate_patterns.length) {
+        const pRow = document.getElementById('pattern-candidates-row');
+        if (pRow) {
+            pRow.innerHTML = data.candidate_patterns.map(p => {
+                const isArmed = p.status === 'ARMED';
+                const isBuy = p.signal === 'BUY';
+                const isSell = p.signal === 'SELL';
+                const badgeBg = isArmed ? (isBuy ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)') : 'rgba(255, 255, 255, 0.05)';
+                const badgeBorder = isArmed ? (isBuy ? '#10b981' : '#ef4444') : 'rgba(255, 255, 255, 0.1)';
+                const badgeColor = isArmed ? (isBuy ? '#10b981' : '#f87171') : '#94a3b8';
+                return `
+                    <div style="background: ${badgeBg}; border: 1px solid ${badgeBorder}; border-radius: 4px; padding: 2px 6px; font-size: 9.5px; font-family: var(--font-mono); display: flex; align-items: center; gap: 4px;" title="${p.reason || ''}">
+                        <span style="color: ${badgeColor}; font-weight: 700;">${p.name.split(' ')[0]}</span>
+                        <span style="color: ${badgeColor};">${p.signal || 'HOLD'}</span>
+                        <span style="color: var(--text-secondary); font-size: 9px;">${p.confidence}%</span>
+                    </div>
+                `;
+            }).join('');
+        }
+    }
     if (data.rsi !== undefined) {
-        document.getElementById('pipe-rsi').textContent = data.rsi.toFixed(1);
+        document.getElementById('pipe-rsi').textContent = Number(data.rsi).toFixed(1);
     }
     if (data.macd !== undefined) {
-        document.getElementById('pipe-macd').textContent = data.macd;
+        document.getElementById('pipe-macd').textContent = String(data.macd);
     }
     if (data.regime) {
         document.getElementById('pipe-regime-name').textContent = `${data.regime} (${Math.round((data.regime_confidence || 0.85)*100)}% conf)`;
@@ -250,10 +357,15 @@ function handleTelemetry(data) {
         document.getElementById('pipe-xgb-status').textContent = data.risk_status;
     }
     if (data.risk_score !== undefined) {
-        document.getElementById('pipe-risk-score').textContent = `${data.risk_score.toFixed(2)} / 0.35 max`;
+        document.getElementById('pipe-risk-score').textContent = `${Number(data.risk_score).toFixed(2)} / 0.35 max`;
     }
     if (data.last_decision) {
         document.getElementById('pipe-decision-text').textContent = data.last_decision;
+        const actBadge = document.getElementById('pipe-action-badge');
+        if (actBadge) {
+            actBadge.textContent = data.last_decision;
+            actBadge.className = data.last_decision.startsWith('BUY') ? 'highlight-green' : (data.last_decision.startsWith('SELL') ? 'text-red' : 'text-cyan');
+        }
     }
 
     // 4. Live Open Position Table & Progress
@@ -263,6 +375,8 @@ function handleTelemetry(data) {
     const pnlText = document.getElementById('pos-pnl-text');
     const capText = document.getElementById('capital-util-text');
     const capFill = document.getElementById('capital-fill');
+    const step5Status = document.getElementById('pipe-pnl-status');
+    const step5Util = document.getElementById('pipe-step5-util');
 
     if (data.open_position) {
         const pos = data.open_position;
@@ -278,31 +392,43 @@ function handleTelemetry(data) {
                 <td>$${pos.allocated_capital.toFixed(2)} (${pos.quantity.toFixed(5)} BTC)</td>
                 <td>$${pos.entry_price.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
                 <td>$${pos.current_price.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
-                <td class="${pnlCls}"><strong>${pnlSign}$${pos.pnl.toFixed(2)} (${pos.pnl_pct >= 0 ? '+' : ''}${pos.pnl_pct.toFixed(2)}%)</strong></td>
+                <td class="${pnlCls}"><strong>${pnlSign}$${pos.pnl.toFixed(3)} (${pos.pnl_pct >= 0 ? '+' : ''}${pos.pnl_pct.toFixed(2)}%)</strong></td>
             </tr>
         `;
 
-        pnlText.textContent = `${pnlSign}$${pos.pnl.toFixed(2)} (${pos.pnl_pct.toFixed(2)}%)`;
+        pnlText.textContent = `${pnlSign}$${pos.pnl.toFixed(3)} (${pos.pnl_pct.toFixed(2)}%)`;
         pnlText.className = 'meter-value ' + pnlCls;
         pnlFill.style.width = `${Math.min(Math.max((pos.pnl_pct + 2) * 25, 5), 100)}%`;
         pnlFill.className = pos.pnl >= 0 ? 'meter-fill meter-fill--green' : 'meter-fill meter-fill--red';
+
+        if (step5Status) {
+            step5Status.textContent = `Active ${pos.side} | Unrealized: ${pnlSign}$${pos.pnl.toFixed(3)}`;
+        }
+        if (step5Util) {
+            step5Util.innerHTML = `Allocated: <strong>$${pos.allocated_capital.toFixed(2)}</strong>`;
+        }
+
+        const utilPct = Math.min(100, Math.round((pos.allocated_capital / Math.max(data.equity || 10, 1)) * 100));
+        capFill.style.width = `${utilPct}%`;
+        capText.textContent = `$${pos.allocated_capital.toFixed(2)} in trade / $${(data.cash_balance || 0).toFixed(2)} free cash (${utilPct}%)`;
+        capFill.className = 'meter-fill ' + (utilPct > 50 ? 'meter-fill--orange' : 'meter-fill--blue');
     } else {
         badge.textContent = 'FLAT';
         badge.className = 'badge';
         posTable.innerHTML = `<tr class="empty-row"><td colspan="5">Scanning for next high-probability pattern...</td></tr>`;
-        pnlText.textContent = '$0.00 (0.00%)';
+        pnlText.textContent = '$0.000 (0.00%)';
         pnlText.className = 'meter-value';
         pnlFill.style.width = '0%';
-    }
 
-    if (data.open_position && data.open_position.allocated_capital) {
-        const utilPct = Math.min(100, Math.round((data.open_position.allocated_capital / 10.0) * 100));
-        capFill.style.width = `${utilPct}%`;
-        capText.textContent = `$${data.open_position.allocated_capital.toFixed(2)} / $10.00`;
-        capFill.className = 'meter-fill ' + (utilPct > 35 ? 'meter-fill--orange' : 'meter-fill--blue');
-    } else {
+        if (step5Status) {
+            step5Status.textContent = 'Flat | Scanning next entry';
+        }
+        if (step5Util) {
+            step5Util.innerHTML = `Allocated: <strong>$0.00</strong>`;
+        }
+
         capFill.style.width = '0%';
-        capText.textContent = `$0.00 / $10.00`;
+        capText.textContent = `$0.00 in trade / $${(data.cash_balance || 10.0).toFixed(2)} free cash (0%)`;
     }
 
     // === 5. Closed Trades History (Live Stream) ===
@@ -847,4 +973,4 @@ document.getElementById('btn-toggle-circuit')?.addEventListener('click', async (
 
 // Initialize
 fetchInitialTrades();
-connectWebSocket();
+initConnection();

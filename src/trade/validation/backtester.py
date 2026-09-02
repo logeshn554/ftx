@@ -98,9 +98,12 @@ class Backtester:
         returns_arr = np.array(daily_returns)
         trade_log = env.trade_log
 
-        # Extract trade PnLs
-        trade_pnls = [t.get("pnl", 0.0) for t in trade_log if "pnl" in t]
-        trade_values = [t.get("price", 0.0) * t.get("shares", 0.0) for t in trade_log]
+        # Extract closed trade PnLs and friction costs
+        trade_pnls = [t.get("net_pnl", t.get("pnl", 0.0)) for t in trade_log if "net_pnl" in t or "pnl" in t]
+        trade_values = [t.get("entry_price", t.get("price", 0.0)) * t.get("quantity", t.get("shares", 0.0)) for t in trade_log]
+        total_costs = sum(t.get("entry_fee", 0.0) + t.get("exit_fee", 0.0) + t.get("slippage_cost", 0.0) for t in trade_log)
+        if total_costs <= 0 and trade_values:
+            total_costs = m.total_transaction_costs(trade_values, self.commission_pct)
 
         # Determine date range from features_df index
         if hasattr(features_df.index, 'date'):
@@ -121,8 +124,8 @@ class Backtester:
             max_drawdown=m.max_drawdown(equity_arr),
             win_rate=m.win_rate(trade_pnls) if trade_pnls else 0.0,
             profit_factor=m.profit_factor(trade_pnls) if trade_pnls else 0.0,
-            total_trades=len(trade_log),
-            transaction_costs=m.total_transaction_costs(trade_values, self.commission_pct),
+            total_trades=len(trade_pnls) if trade_pnls else len(trade_log),
+            transaction_costs=float(total_costs),
             daily_returns=daily_returns,
             equity_curve=equity_curve,
             trade_log=trade_log,

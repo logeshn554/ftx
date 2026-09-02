@@ -1,8 +1,54 @@
-"""Configurable transaction cost model with stress multipliers."""
+"""Configurable transaction cost model with canonical execution cost estimates."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ExecutionCost:
+    entry_fee: float
+    exit_fee: float
+    entry_slippage: float
+    exit_slippage: float
+    spread_cost: float
+    total_cost: float
+
+    @property
+    def total_cost_fraction(self) -> float:
+        return self.total_cost
+
+
+def estimate_execution_cost(
+    side: str,
+    quantity: float,
+    price: float,
+    liquidity: float = 1.0,
+    spread: float = 0.0,
+    fee_rate: float = 0.001,
+    slippage_rate: float = 0.0005,
+) -> ExecutionCost:
+    """Canonical execution cost calculator across all runtimes."""
+    notional = float(quantity) * float(price)
+    # Liquidity impact scaling (if liquidity < 1.0, slippage scales up)
+    liq_multiplier = 1.0 / max(0.1, float(liquidity))
+    effective_slippage = slippage_rate * liq_multiplier
+    
+    entry_fee = notional * fee_rate
+    exit_fee = notional * fee_rate
+    entry_slip = notional * effective_slippage
+    exit_slip = notional * effective_slippage
+    spread_cost = notional * (spread * 0.5)
+    
+    total = entry_fee + exit_fee + entry_slip + exit_slip + spread_cost
+    return ExecutionCost(
+        entry_fee=entry_fee,
+        exit_fee=exit_fee,
+        entry_slippage=entry_slip,
+        exit_slippage=exit_slip,
+        spread_cost=spread_cost,
+        total_cost=total,
+    )
 
 
 @dataclass(frozen=True)
@@ -27,6 +73,20 @@ class CostModel:
     @property
     def fee_rate(self) -> float:
         return (self.config.taker_fee if self.config.use_taker else self.config.maker_fee) * self.fee_mult
+
+    @property
+    def slippage_rate(self) -> float:
+        return self.config.entry_slippage * self.slippage_mult
+
+    def estimate_cost(self, side: str = "BUY", quantity: float = 1.0, price: float = 1.0) -> ExecutionCost:
+        return estimate_execution_cost(
+            side=side,
+            quantity=quantity,
+            price=price,
+            spread=self.config.spread_estimate,
+            fee_rate=self.fee_rate,
+            slippage_rate=self.slippage_rate,
+        )
 
     def estimated_entry_cost(self, notional: float = 1.0) -> float:
         """Entry cost as fraction of notional (fee + slippage + half spread)."""

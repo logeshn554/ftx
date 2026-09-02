@@ -1106,7 +1106,7 @@ class GoalAndSurvivalController:
 
         return None
 
-    def get_summary(self, current_equity: float = 1000.0) -> dict:
+    def get_summary(self, current_equity: float = 10.0) -> dict:
         eq = current_equity if current_equity is not None else self.current_equity
         dist_to_goal = max(0.0, round(self.profit_target - eq, 2))
         safety_to_ruin = max(0.0, round(eq - self.ruin_floor, 2))
@@ -1621,7 +1621,7 @@ class WebRLEngine:
         if len(self.learning_curve) > 100:
             self.learning_curve.pop(0)
 
-    def get_full_telemetry(self, current_equity: float = 1000.0) -> dict:
+    def get_full_telemetry(self, current_equity: float = 10.0) -> dict:
         """Get complete WebRL + Q-Learning + MuZero + GRPO + PDRL telemetry."""
         progress_to_100 = self.total_trades % 100
         return {

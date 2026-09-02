@@ -87,7 +87,13 @@ class PaperTradingSession:
     def open_trade(self, symbol: str, decision: TradeDecision, price: float) -> bool:
         if decision.action != "TRADE" or not decision.side:
             return False
-        notional = min(self.ledger.cash, decision.position_size * price)
+        available = self.ledger.cash
+        target_notional = decision.position_size * price
+        # For micro-accounts (e.g. $10), allocate 30%-45% of available cash ($3.00 - $4.50)
+        # so profit/loss dynamically and visibly updates account balance
+        if available <= 50.0:
+            target_notional = max(target_notional, min(available * 0.40, 4.50))
+        notional = min(available * 0.95, target_notional)
         qty = notional / max(price, 1e-12)
         if qty <= 0:
             return False

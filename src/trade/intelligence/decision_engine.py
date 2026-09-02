@@ -1,8 +1,9 @@
-"""Canonical trading decision service — single pipeline for all runtimes."""
+"""Canonical trading decision service with Edge Gate and No-Trade audit logging."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from trade.data.contract import observation_columns
@@ -23,26 +24,49 @@ from trade.strategies.trend import TrendStrategy
 
 @dataclass(frozen=True)
 class TradeDecision:
-    action: str  # TRADE | HOLD
+    action: str  # TRADE | HOLD | FORCE_FLAT | REJECT
     side: str | None
+
     confidence: float
-    expected_value: float
-    expected_move: float
-    estimated_cost: float
+    uncertainty: float
+
+    expected_return: float
+    expected_gross_return: float
+    expected_cost: float
+    expected_net_edge: float
+
+    trade_quality: float
+
     risk: float
     target_pct: float
     stop_pct: float
     position_size: float
+
     strategy: str | None
     reason: str
+
     model_version: str
     strategy_version: str
+
     audit: dict[str, Any] = field(default_factory=dict)
+
+    # Backward compatibility properties
+    @property
+    def expected_value(self) -> float:
+        return self.expected_net_edge
+
+    @property
+    def estimated_cost(self) -> float:
+        return self.expected_cost
+
+    @property
+    def expected_move(self) -> float:
+        return self.expected_return
 
 
 class DecisionEngine:
     """Canonical Trading Pipeline:
-    Market Data -> Features -> Regime -> Strategies -> Strategy Selection -> EV Filter -> Cost Gate -> Risk & Survival -> Sizing -> Decision
+    Market Data -> Features -> Regime -> Strategies -> Strategy Selection -> Edge Gate -> Cost Filter -> Risk & Sizing -> Decision
     """
 
     def __init__(
@@ -52,7 +76,7 @@ class DecisionEngine:
         minimum_signal_confidence: float = 0.55,
         maximum_risk: float = 0.35,
         cost_config: CostConfig | None = None,
-        cost_safety_multiplier: float = 1.5,
+        cost_safety_multiplier: float = 1.0,
         strategies: list[Strategy] | None = None,
         cooldown_config: CooldownConfig | None = None,
         strategy_selector: StrategySelector | None = None,
@@ -61,7 +85,7 @@ class DecisionEngine:
         self.strategy_version = strategy_version
         self.cost_model = CostModel(cost_config or CostConfig())
         self.target_engine = TargetEngine(self.cost_model, cost_safety_multiplier=cost_safety_multiplier)
-        self.ev_filter = ExpectedValueFilter(cost_margin=cost_safety_multiplier / 1.25)
+        self.ev_filter = ExpectedValueFilter(cost_margin=cost_safety_multiplier)
         self.pipeline = DecisionPipeline(self.ev_filter, minimum_signal_confidence, maximum_risk)
         self.survival = SurvivalController()
         self.cooldown = CooldownController(cooldown_config)
@@ -73,9 +97,9 @@ class DecisionEngine:
             BreakoutStrategy(),
         ]
         self._strategy_map: dict[str, Strategy] = {s.name: s for s in self.strategies}
+        self.rejected_trades: list[dict[str, Any]] = []
 
     def _filter_indicators(self, indicators: dict) -> dict:
-        """Enforce observation feature contract to guarantee no target/future leakage."""
         allowed = set(observation_columns(indicators.keys()))
         return {k: v for k, v in indicators.items() if k in allowed or k in {
             "trend", "rsi_zone", "bb_position", "momentum_20", "atr_pct", "atr_14", "volume_ratio"
@@ -89,7 +113,6 @@ class DecisionEngine:
     ) -> Signal:
         clean_indicators = self._filter_indicators(indicators)
 
-        # If empirical regime performance is available, select best strategy
         if regime_performance:
             selection = self.strategy_selector.select(regime, regime_performance)
             if selection.selected_strategy and selection.selected_strategy in self._strategy_map:
@@ -97,7 +120,6 @@ class DecisionEngine:
                 if sig.side in {"BUY", "SELL"} and sig.confidence > 0:
                     return sig
 
-        # Evaluate candidate signals across all strategies
         candidates = [s.signal(clean_indicators) for s in self.strategies]
         actionable = [c for c in candidates if c.side in {"BUY", "SELL"} and c.confidence > 0]
         if not actionable:
@@ -119,8 +141,15 @@ class DecisionEngine:
         data_quality_ok: bool = True,
         drift_detected: bool = False,
         regime_performance: dict[str, dict] | None = None,
+        uncertainty: float | None = None,
     ) -> TradeDecision:
-        audit: dict[str, Any] = {"regime": regime, "regime_confidence": regime_confidence}
+        audit: dict[str, Any] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "price": entry_price,
+            "equity": equity,
+            "regime": regime,
+            "regime_confidence": regime_confidence,
+        }
 
         # 1. Survival Controller Gate (Hard Halt)
         survival_state = self.survival.update(
@@ -156,20 +185,23 @@ class DecisionEngine:
         atr_pct = float(indicators.get("atr_pct", indicators.get("atr_14", 0.0)))
         target_plan = self.target_engine.plan(
             atr_pct=atr_pct,
-            expected_move_pct=signal.expected_move * 100 if signal.expected_move < 1 else signal.expected_move,
-            strategy_target_pct=signal.target_distance * 100 if signal.target_distance < 1 else signal.target_distance,
+            expected_move_pct=signal.expected_move,
+            strategy_target_pct=signal.target_distance,
         )
         audit["target_plan"] = target_plan.reason
         if not target_plan.should_trade:
             return self._hold(target_plan.reason, audit, signal)
 
-        # 6. Expected Value (EV) Filter Gate
+        # 6. Edge Gate & No-Trade Filter (Zero fabricated probability)
+        calibrated_p_win = p_win
+        if calibrated_p_win is None and hasattr(signal, "probability"):
+            calibrated_p_win = getattr(signal, "probability")
+
         est_cost_frac = self.cost_model.estimated_round_trip_cost_fraction()
-        win_p = p_win if p_win is not None else min(1.0, 0.5 + signal.confidence * 0.3)
         ev_decision: Decision = self.pipeline.decide(
             signal=signal.side,
             confidence=signal.confidence,
-            p_win=win_p,
+            p_win=calibrated_p_win,
             expected_win_return=target_plan.take_profit_pct / 100,
             expected_loss_return=target_plan.stop_loss_pct / 100,
             expected_cost=est_cost_frac,
@@ -177,10 +209,23 @@ class DecisionEngine:
             regime_valid=regime_confidence >= 0.4 or regime == "UNKNOWN",
             execution_valid=data_quality_ok,
             expected_move=target_plan.expected_move_pct / 100,
+            uncertainty=uncertainty,
         )
         audit.update(ev_decision.audit)
         if ev_decision.action == "HOLD":
-            return self._hold(ev_decision.reason, audit, signal, ev_decision.expected_value)
+            gross_ret = ev_decision.ev_detail.expected_gross_return if ev_decision.ev_detail else 0.0
+            net_edge = ev_decision.expected_value
+            trade_qual = ev_decision.ev_detail.trade_quality if ev_decision.ev_detail else 0.0
+            unc = ev_decision.ev_detail.uncertainty if ev_decision.ev_detail else (uncertainty or max(0.0, 1.0 - signal.confidence))
+            return self._hold(
+                ev_decision.reason,
+                audit,
+                signal,
+                expected_gross_return=gross_ret,
+                expected_net_edge=net_edge,
+                trade_quality=trade_qual,
+                uncertainty=unc,
+            )
 
         # 7. Risk-Anchored Position Sizing
         stop_dist = entry_price * (target_plan.stop_loss_pct / 100)
@@ -195,15 +240,24 @@ class DecisionEngine:
             reward_to_risk=target_plan.take_profit_pct / max(target_plan.stop_loss_pct, 0.01),
         )
         if qty <= 0:
-            return self._hold("position_size_zero", audit, signal, ev_decision.expected_value)
+            return self._hold("position_size_zero", audit, signal)
+
+        ev_detail = ev_decision.ev_detail
+        gross_ret = ev_detail.expected_gross_return if ev_detail else 0.0
+        net_edge = ev_detail.expected_net_edge if ev_detail else 0.0
+        trade_qual = ev_detail.trade_quality if ev_detail else 0.0
+        unc = ev_detail.uncertainty if ev_detail else (uncertainty or max(0.0, 1.0 - signal.confidence))
 
         return TradeDecision(
             action="TRADE",
             side=signal.side,
             confidence=signal.confidence,
-            expected_value=ev_decision.expected_value,
-            expected_move=target_plan.expected_move_pct,
-            estimated_cost=est_cost_frac * 100,
+            uncertainty=unc,
+            expected_return=target_plan.expected_move_pct,
+            expected_gross_return=gross_ret * 100,
+            expected_cost=est_cost_frac * 100,
+            expected_net_edge=net_edge * 100,
+            trade_quality=trade_qual,
             risk=risk_score,
             target_pct=target_plan.take_profit_pct,
             stop_pct=target_plan.stop_loss_pct,
@@ -220,15 +274,40 @@ class DecisionEngine:
         reason: str,
         audit: dict,
         signal: Signal | None = None,
-        ev: float = 0.0,
+        expected_gross_return: float = 0.0,
+        expected_net_edge: float = 0.0,
+        trade_quality: float = 0.0,
+        uncertainty: float = 0.0,
     ) -> TradeDecision:
+        conf = signal.confidence if signal else 0.0
+        unc = uncertainty if uncertainty > 0 else max(0.0, 1.0 - conf)
+        cost_pct = self.cost_model.estimated_round_trip_cost_pct()
+        
+        rejection_record = {
+            "timestamp": audit.get("timestamp", datetime.now(timezone.utc).isoformat()),
+            "proposed_side": signal.side if signal else None,
+            "strategy": signal.strategy if signal else None,
+            "confidence": conf,
+            "uncertainty": unc,
+            "expected_gross_return": expected_gross_return,
+            "expected_cost": cost_pct,
+            "expected_net_edge": expected_net_edge,
+            "trade_quality": trade_quality,
+            "reason": reason,
+        }
+        self.rejected_trades.append(rejection_record)
+        audit["rejection_logged"] = True
+
         return TradeDecision(
             action="HOLD",
             side=None,
-            confidence=signal.confidence if signal else 0.0,
-            expected_value=ev,
-            expected_move=signal.expected_move if signal else 0.0,
-            estimated_cost=self.cost_model.estimated_round_trip_cost_pct(),
+            confidence=conf,
+            uncertainty=unc,
+            expected_return=signal.expected_move if signal else 0.0,
+            expected_gross_return=expected_gross_return,
+            expected_cost=cost_pct,
+            expected_net_edge=expected_net_edge,
+            trade_quality=trade_quality,
             risk=0.0,
             target_pct=0.0,
             stop_pct=0.0,

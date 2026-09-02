@@ -6,8 +6,25 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import pathlib
+import shutil
+import tempfile
 from trade.core.config import AppConfig, build_config
 from trade.core.types import Order, OrderSide, PortfolioState, Position
+
+
+@pytest.fixture
+def tmp_path():
+    import uuid
+    base = pathlib.Path(__file__).parent.parent / ".tmp_tests"
+    base.mkdir(parents=True, exist_ok=True)
+    target = base / f"run_{uuid.uuid4().hex[:8]}"
+    target.mkdir(parents=True, exist_ok=True)
+    yield target
+    try:
+        shutil.rmtree(target, ignore_errors=True)
+    except Exception:
+        pass
 
 
 @pytest.fixture

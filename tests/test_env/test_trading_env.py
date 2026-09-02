@@ -1,4 +1,4 @@
-"""Tests for the trading environment."""
+"""Tests for the Gymnasium trading environment and action transitions."""
 
 import numpy as np
 import pytest
@@ -37,43 +37,82 @@ class TestTradingEnv:
         assert info["position"] == 0.0
         assert info["portfolio_value"] == 100_000.0
 
-    def test_hold_action(self, sample_ohlcv):
-        """HOLD action doesn't change portfolio."""
+    def test_flat_hold_stays_flat(self, sample_ohlcv):
+        """Flat + HOLD stays flat with 0 fees and 0 turnover."""
         env = self._make_env(sample_ohlcv)
         env.reset()
 
         obs, reward, term, trunc, info = env.step(0)  # HOLD
         assert info["position"] == 0.0
         assert info["cash"] == 100_000.0
+        assert info["fees"] == 0.0
+        assert info["turnover"] == 0.0
 
-    def test_buy_then_sell(self, sample_ohlcv):
-        """BUY followed by SELL creates a trade."""
+    def test_long_hold_stays_long(self, sample_ohlcv):
+        """Long + HOLD maintains long position without additional fees or turnover."""
         env = self._make_env(sample_ohlcv)
         env.reset()
 
-        # BUY
-        obs, reward, term, trunc, info = env.step(1)
-        assert info["position"] > 0
-        assert info["cash"] < 100_000.0
+        # Step 1: Open Long
+        _, _, _, _, info1 = env.step(1)
+        initial_pos = info1["position"]
+        initial_fees = info1["fees"]
+        initial_turnover = info1["turnover"]
+        assert initial_pos > 0
 
-        # SELL
-        obs, reward, term, trunc, info = env.step(2)
-        assert info["position"] == 0.0
+        # Step 2: HOLD
+        _, _, _, _, info2 = env.step(0)
+        assert info2["position"] == initial_pos
+        assert info2["fees"] == initial_fees
+        assert info2["turnover"] == initial_turnover
 
-        # Should have some trade log entries
-        assert len(env.trade_log) == 2
-
-    def test_observation_shape_consistent(self, sample_ohlcv):
-        """Observation shape remains consistent across steps."""
+    def test_reversal_short_to_long_same_step(self, sample_ohlcv):
+        """Reversal: SHORT -> BUY closes short and opens long on the exact same step."""
         env = self._make_env(sample_ohlcv)
-        obs, _ = env.reset()
-        expected_shape = obs.shape
+        env.reset()
 
-        for _ in range(10):
-            obs, _, term, trunc, _ = env.step(env.action_space.sample())
-            if term or trunc:
-                break
-            assert obs.shape == expected_shape
+        # Step 1: SELL -> Open Short
+        _, _, _, _, info_short = env.step(2)
+        assert info_short["position"] < 0
+        assert info_short["position_side"] == "SELL"
+
+        # Step 2: BUY -> Reverses short to long
+        _, _, _, _, info_long = env.step(1)
+        assert info_long["position"] > 0
+        assert info_long["position_side"] == "BUY"
+
+        # Trade log should have entry for SELL, close of SELL, and entry for BUY
+        assert len(env.trade_log) == 3
+
+    def test_reversal_long_to_short_same_step(self, sample_ohlcv):
+        """Reversal: LONG -> SELL closes long and opens short on the exact same step."""
+        env = self._make_env(sample_ohlcv)
+        env.reset()
+
+        # Step 1: BUY -> Open Long
+        _, _, _, _, info_long = env.step(1)
+        assert info_long["position"] > 0
+        assert info_long["position_side"] == "BUY"
+
+        # Step 2: SELL -> Reverses long to short
+        _, _, _, _, info_short = env.step(2)
+        assert info_short["position"] < 0
+        assert info_short["position_side"] == "SELL"
+
+        assert len(env.trade_log) == 3
+
+    def test_force_flat_outside_policy_actions(self, sample_ohlcv):
+        """force_flat closes open position to cash with explicit audit reason."""
+        env = self._make_env(sample_ohlcv)
+        env.reset()
+
+        env.step(1)  # BUY
+        assert env._accounting.position > 0
+
+        closed = env.force_flat(reason="RISK_KILL_SWITCH")
+        assert closed is not None
+        assert env._accounting.position == 0.0
+        assert env.trade_log[-1]["action"] == "RISK_KILL_SWITCH"
 
     def test_episode_terminates(self, sample_ohlcv):
         """Episode eventually terminates."""

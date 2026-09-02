@@ -26,6 +26,11 @@
             </div>
             <div class="header-center">
                 <div class="status-group">
+                    <div class="status-item" id="connection-status-item" title="Live connection to trading engine backend">
+                        <span class="status-dot status-dot--active" id="conn-dot"></span>
+                        <span class="status-label">Backend</span>
+                        <span class="status-value highlight-green" id="conn-status-text">LIVE (Connected)</span>
+                    </div>
                     <div class="status-item">
                         <span class="status-dot status-dot--active" id="pipeline-dot"></span>
                         <span class="status-label">Pipeline</span>
@@ -64,22 +69,22 @@
                 <div class="kpi-card" id="kpi-cash">
                     <span class="kpi-label">Available Cash</span>
                     <span class="kpi-value highlight-cyan" id="cash-value">$10.00</span>
-                    <span class="kpi-sub">Base: $10.00</span>
+                    <span class="kpi-sub" id="cash-base-sub">Cash Pool: 100%</span>
                 </div>
                 <div class="kpi-card" id="kpi-pnl">
                     <span class="kpi-label">Realized Net P&amp;L</span>
-                    <span class="kpi-value pnl-positive" id="pnl-value">+$0.00</span>
+                    <span class="kpi-value pnl-positive" id="pnl-value">+$0.000</span>
                     <span class="kpi-delta" id="pnl-delta">0.00%</span>
                 </div>
                 <div class="kpi-card" id="kpi-trades">
                     <span class="kpi-label">Completed Attempts</span>
                     <span class="kpi-value highlight-orange" id="trades-count-val">0</span>
-                    <span class="kpi-sub" id="win-rate-val">Win Rate: —</span>
+                    <span class="kpi-sub" id="win-rate-val">Win Rate: 0.0% (0W / 0L)</span>
                 </div>
                 <div class="kpi-card" id="kpi-fees">
-                    <span class="kpi-label">Trading Fees (0.2%)</span>
-                    <span class="kpi-value" style="color: #f59e0b;" id="fees-total-val">$0.00</span>
-                    <span class="kpi-sub">Roundtrip: 0.2%</span>
+                    <span class="kpi-label">Trading Fees</span>
+                    <span class="kpi-value" style="color: #f59e0b;" id="fees-total-val">$0.000</span>
+                    <span class="kpi-sub" id="fees-roundtrip-sub">Fee: 0.1% / leg</span>
                 </div>
                 <div class="kpi-card" id="kpi-drawdown">
                     <span class="kpi-label">Max Drawdown</span>
@@ -100,21 +105,22 @@
                     <!-- Step 1: Pattern Identification -->
                     <div class="pipeline-step-box" id="step-box-1">
                         <div class="step-num">STEP 1</div>
-                        <div class="step-title">Pattern Identification</div>
-                        <div class="step-desc" id="pipe-pattern-name">Scanning 5 Candle Formations...</div>
+                        <div class="step-title">Continuous Pattern Scanner</div>
+                        <div class="step-desc" id="pipe-pattern-name">Scanning 4 Specialist Patterns...</div>
                         <div class="step-meta">
-                            <span>RSI: <strong id="pipe-rsi">56.4</strong></span>
-                            <span>MACD: <strong id="pipe-macd">+14.2</strong></span>
+                            <span>RSI: <strong id="pipe-rsi">50.0</strong></span>
+                            <span>MACD: <strong id="pipe-macd">+0.00%</strong></span>
                         </div>
+                        <div class="pattern-candidates-row" id="pattern-candidates-row" style="display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap;"></div>
                     </div>
 
                     <!-- Step 2: HMM Regime & Memory Recall -->
                     <div class="pipeline-step-box" id="step-box-2">
                         <div class="step-num">STEP 2</div>
                         <div class="step-title">Regime &amp; FAISS Recall</div>
-                        <div class="step-desc" id="pipe-regime-name">Bullish Trend (89% conf)</div>
+                        <div class="step-desc" id="pipe-regime-name">Bullish Trend (85% conf)</div>
                         <div class="step-meta">
-                            <span id="pipe-faiss-match">FAISS: Matched 94.2% Ep #1428</span>
+                            <span id="pipe-faiss-match">FAISS Memory Active</span>
                         </div>
                     </div>
 
@@ -132,9 +138,9 @@
                     <div class="pipeline-step-box" id="step-box-4">
                         <div class="step-num">STEP 4</div>
                         <div class="step-title">PPO Agent Execution</div>
-                        <div class="step-desc" id="pipe-decision-text">BUY (Confidence: 88%)</div>
+                        <div class="step-desc" id="pipe-decision-text">HOLD (Scanning)</div>
                         <div class="step-meta">
-                            <span>Action: <strong class="highlight-green">BUY BTC</strong></span>
+                            <span>Action: <strong class="highlight-green" id="pipe-action-badge">SCANNING</strong></span>
                         </div>
                     </div>
 
@@ -142,10 +148,10 @@
                     <div class="pipeline-step-box" id="step-box-5">
                         <div class="step-num">STEP 5</div>
                         <div class="step-title">$10 Position &amp; PnL</div>
-                        <div class="step-desc" id="pipe-pnl-status">Live Dynamic Tracking</div>
+                        <div class="step-desc" id="pipe-pnl-status">Flat | Scanning next entry</div>
                         <div class="step-meta">
-                            <span>Fee: <strong>0.1%</strong></span>
-                            <span>Limit: <strong>50% Max</strong></span>
+                            <span id="pipe-step5-fee">Fee: <strong>0.1%</strong></span>
+                            <span id="pipe-step5-util">Allocated: <strong>$0.00</strong></span>
                         </div>
                     </div>
                 </div>
@@ -173,16 +179,16 @@
                         <div class="meter">
                             <span class="meter-label">Active Trade Unrealized P&amp;L</span>
                             <div class="meter-bar">
-                                <div class="meter-fill meter-fill--green" id="pos-pnl-fill" style="width: 50%"></div>
+                                <div class="meter-fill meter-fill--green" id="pos-pnl-fill" style="width: 0%"></div>
                             </div>
                             <span class="meter-value" id="pos-pnl-text">$0.00 (0.00%)</span>
                         </div>
                         <div class="meter">
                             <span class="meter-label">Capital Utilization</span>
                             <div class="meter-bar">
-                                <div class="meter-fill meter-fill--blue" id="capital-fill" style="width: 35%"></div>
+                                <div class="meter-fill meter-fill--blue" id="capital-fill" style="width: 0%"></div>
                             </div>
-                            <span class="meter-value" id="capital-util-text">$3.50 / $10.00</span>
+                            <span class="meter-value" id="capital-util-text">$0.00 in trade / $10.00 free cash</span>
                         </div>
                     </div>
 
